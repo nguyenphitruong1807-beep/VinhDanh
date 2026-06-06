@@ -129,9 +129,13 @@ const DEFAULT_TEMPLATE = {
 
 const SNAP_THRESHOLD = 14;
 const SLOT_HANDLE_SIZE = 20;
+const MAX_PERSON_EDGE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? 1800 : 2400;
+const MAX_REMOVE_BG_EDGE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? 1500 : 1900;
 const $ = (id) => document.getElementById(id);
 const canvas = $("posterCanvas");
 const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 
 let template = structuredClone(DEFAULT_TEMPLATE);
 let bgImg = null;
@@ -152,6 +156,10 @@ let draggingPerson = false;
 let draggingText = false;
 let draggingSlot = false;
 let resizingSlot = false;
+let lastTapAt = 0;
+let hideToastTimer = null;
+const activePointers = new Map();
+let pinchState = null;
 let selectedTextKey = "awardTitle";
 let dragStart = { x:0, y:0, px:0, py:0, fieldX:0, fieldY:0, slotX:0, slotY:0, slotW:0, slotH:0 };
 let textRenderBoxes = new Map();
@@ -163,14 +171,24 @@ let person = {
   scale: 1,
   brightness: 100,
   contrast: 100,
+  saturation: 100,
+  temperature: 0,
+  tint: 0,
+  sharpness: 0,
   bounds: null
 };
+
+let processedPersonCanvas = null;
+let processedPersonKey = "";
+let exportCleanMode = false;
 
 let textValues = {};
 
 async function init(){
   setupCanvas();
   bindEvents();
+  if(isIOS && $("iosSavePanel")) $("iosSavePanel").hidden = false;
+  resetRemoveBgProgress();
   await loadFonts();
 
   const saved = localStorage.getItem("unite_poster_template");
@@ -261,7 +279,7 @@ function bindEvents(){
       activeTab = btn.dataset.tab;
       $("canvasHint").textContent = activeTab === "admin"
         ? "Admin: kéo chữ, kéo vùng người hoặc kéo nút resize ở góc phải dưới."
-        : "Leader: kéo trực tiếp ảnh người để chỉnh vị trí.";
+        : "Leader: kéo ảnh người, chụm 2 ngón để zoom trên điện thoại.";
       snapState.active = false;
       render();
     });
@@ -271,10 +289,16 @@ function bindEvents(){
     const file = e.target.files?.[0];
     if(!file) return;
     personSourceFile = file;
-    personImg = await fileToImage(file);
+    setRemoveBgStatus("Đang tối ưu ảnh cho điện thoại...");
+    const rawImg = await fileToImage(file);
+    personImg = await downscaleImageIfNeeded(rawImg, MAX_PERSON_EDGE);
     await waitImage(personImg);
     person.bounds = getAlphaBounds(personImg);
+    invalidatePersonCache();
+    resetToneControls(false);
     autoFitPerson();
+    setRemoveBgStatus("Đã nạp ảnh. Có thể kéo trực tiếp trên poster hoặc chụm 2 ngón để zoom.");
+    showMobileToast("Kéo avatar bằng 1 ngón • Chụm 2 ngón để zoom");
     render();
   });
 
@@ -325,13 +349,20 @@ function bindEvents(){
     }
   });
 
-  $("btnAutoFit").addEventListener("click", () => { autoFitPerson(); render(); });
+  $("btnAutoFit").addEventListener("click", () => { autoFitPerson(); render(); showMobileToast("Đã tự căn vào khung avatar"); });
+  $("btnMobileFit").addEventListener("click", () => { mobileQuickFit(); render(); });
   $("btnExport").addEventListener("click", exportPNG);
+  $("btnSharePoster").addEventListener("click", sharePosterPNG);
   $("btnRemoveBg").addEventListener("click", removeBackgroundInBrowser);
+  $("btnResetTone").addEventListener("click", () => { resetToneControls(true); render(); });
 
   $("scaleRange").addEventListener("input", e => { person.scale = Number(e.target.value); render(); });
-  $("brightnessRange").addEventListener("input", e => { person.brightness = Number(e.target.value); render(); });
-  $("contrastRange").addEventListener("input", e => { person.contrast = Number(e.target.value); render(); });
+  $("brightnessRange").addEventListener("input", e => { person.brightness = Number(e.target.value); invalidatePersonCache(); render(); });
+  $("contrastRange").addEventListener("input", e => { person.contrast = Number(e.target.value); invalidatePersonCache(); render(); });
+  $("saturationRange").addEventListener("input", e => { person.saturation = Number(e.target.value); invalidatePersonCache(); render(); });
+  $("temperatureRange").addEventListener("input", e => { person.temperature = Number(e.target.value); updateToneLabels(); invalidatePersonCache(); render(); });
+  $("tintRange").addEventListener("input", e => { person.tint = Number(e.target.value); updateToneLabels(); invalidatePersonCache(); render(); });
+  $("sharpnessRange").addEventListener("input", e => { person.sharpness = Number(e.target.value); updateToneLabels(); invalidatePersonCache(); render(); });
 
   document.querySelectorAll("[data-nudge]").forEach(btn => {
     btn.addEventListener("click", () => nudge(btn.dataset.nudge));
@@ -356,8 +387,10 @@ function bindEvents(){
 
   canvas.addEventListener("pointerdown", pointerDown);
   canvas.addEventListener("pointermove", pointerMove);
-  canvas.addEventListener("pointerleave", resetDragAndSnap);
-  window.addEventListener("pointerup", resetDragAndSnap);
+  canvas.addEventListener("pointerleave", pointerLeave);
+  canvas.addEventListener("pointercancel", pointerUp);
+  window.addEventListener("pointerup", pointerUp);
+  window.addEventListener("resize", () => showMobileToast("Kéo 1 ngón • Chụm 2 ngón để zoom"));
 }
 
 async function refreshAuthStatus(){
@@ -564,11 +597,13 @@ function syncTemplateMetaFromInputs(){
 }
 
 function resetDragAndSnap(){
-  const changed = draggingPerson || draggingText || draggingSlot || resizingSlot || snapState.active;
+  const changed = draggingPerson || draggingText || draggingSlot || resizingSlot || snapState.active || pinchState || activePointers.size;
   draggingPerson = false;
   draggingText = false;
   draggingSlot = false;
   resizingSlot = false;
+  pinchState = null;
+  activePointers.clear();
   if(snapState.active){ snapState.active = false; }
   if(changed) render();
 }
@@ -752,9 +787,11 @@ function render(){
   else fillPlaceholder("Chưa có background");
 
   if(personImg){
+    const drawable = getProcessedPersonDrawable();
     ctx.save();
-    ctx.filter = `brightness(${person.brightness}%) contrast(${person.contrast}%)`;
-    ctx.drawImage(personImg, person.x, person.y, personImg.width * person.scale, personImg.height * person.scale);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(drawable, person.x, person.y, drawable.width * person.scale, drawable.height * person.scale);
     ctx.restore();
   }
 
@@ -762,7 +799,8 @@ function render(){
   drawDynamicText();
   if(activeTab === "admin" && showTextGuides) drawTextGuides();
   if(showSlot) drawPersonSlotGuide();
-  if(snapState.active) drawCenterSnapFeedback();
+  if(personImg && activeTab === "leader" && !exportCleanMode) drawPersonTransformGuide();
+  if(snapState.active && !exportCleanMode) drawCenterSnapFeedback();
 }
 
 function drawCover(img, x, y, w, h){
@@ -897,6 +935,46 @@ function drawPersonSlotGuide(){
   ctx.restore();
 }
 
+function drawPersonTransformGuide(){
+  if(!personImg) return;
+  const b = person.bounds || { x:0, y:0, width:personImg.width, height:personImg.height };
+  const x = person.x + b.x * person.scale;
+  const y = person.y + b.y * person.scale;
+  const w = b.width * person.scale;
+  const h = b.height * person.scale;
+  ctx.save();
+  ctx.setLineDash([10, 8]);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(255,216,115,.95)";
+  ctx.strokeRect(x, y, w, h);
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(0,0,0,.58)";
+  const label = "Avatar: kéo / chụm để chỉnh";
+  ctx.font = "800 20px Inter, Arial, sans-serif";
+  const labelW = Math.min(ctx.measureText(label).width + 28, canvas.width - 36);
+  const labelX = clamp(x + w / 2 - labelW / 2, 18, canvas.width - labelW - 18);
+  const labelY = clamp(y - 52, 18, canvas.height - 60);
+  roundRect(ctx, labelX, labelY, labelW, 38, 18);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,216,115,.75)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#ffe49a";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, labelX + labelW / 2, labelY + 20);
+  const dots = [[x,y],[x+w,y],[x,y+h],[x+w,y+h]];
+  ctx.fillStyle = "#ffd86c";
+  ctx.strokeStyle = "rgba(0,0,0,.7)";
+  dots.forEach(([dx,dy]) => {
+    ctx.beginPath();
+    ctx.arc(dx, dy, 8, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
 function drawCenterSnapFeedback(){
   const centerX = snapState.targetX || canvas.width / 2;
   ctx.save();
@@ -964,28 +1042,388 @@ function getAlphaBounds(img){
   return {x:minX,y:minY,width:maxX-minX+1,height:maxY-minY+1};
 }
 
+function invalidatePersonCache(){
+  processedPersonCanvas = null;
+  processedPersonKey = "";
+}
+
+function getToneKey(){
+  return [
+    personImg?.src || personImg?.width,
+    personImg?.height,
+    person.brightness,
+    person.contrast,
+    person.saturation,
+    person.temperature,
+    person.tint,
+    person.sharpness
+  ].join("|");
+}
+
+function hasPixelToneAdjustment(){
+  return person.brightness !== 100 || person.contrast !== 100 || person.saturation !== 100 ||
+    person.temperature !== 0 || person.tint !== 0 || person.sharpness !== 0;
+}
+
+function getProcessedPersonDrawable(){
+  if(!personImg) return personImg;
+  if(!hasPixelToneAdjustment()) return personImg;
+  const key = getToneKey();
+  if(processedPersonCanvas && processedPersonKey === key) return processedPersonCanvas;
+
+  const c = document.createElement("canvas");
+  c.width = personImg.width;
+  c.height = personImg.height;
+  const cx = c.getContext("2d", { willReadFrequently:true });
+  cx.drawImage(personImg, 0, 0);
+  const img = cx.getImageData(0, 0, c.width, c.height);
+  const data = img.data;
+
+  const brightness = person.brightness / 100;
+  const contrastValue = (person.contrast - 100) * 2.55;
+  const saturation = person.saturation / 100;
+  const temp = person.temperature / 100;
+  const tint = person.tint / 100;
+  const cFactor = 259 * (contrastValue + 255) / (255 * (259 - contrastValue));
+
+  for(let i=0; i<data.length; i+=4){
+    if(data[i+3] === 0) continue;
+    let r = data[i], g = data[i+1], b = data[i+2];
+    r = cFactor * (r - 128) + 128;
+    g = cFactor * (g - 128) + 128;
+    b = cFactor * (b - 128) + 128;
+    r *= brightness; g *= brightness; b *= brightness;
+
+    const gray = r * 0.2126 + g * 0.7152 + b * 0.0722;
+    r = gray + (r - gray) * saturation;
+    g = gray + (g - gray) * saturation;
+    b = gray + (b - gray) * saturation;
+
+    // temperature: âm = lạnh hơn, dương = ấm hơn
+    r += 30 * temp;
+    b -= 34 * temp;
+    g += 5 * temp;
+
+    // tint: âm = xanh lá hơn, dương = hồng/magenta hơn
+    r += 18 * tint;
+    b += 18 * tint;
+    g -= 26 * tint;
+
+    data[i] = clampByte(r);
+    data[i+1] = clampByte(g);
+    data[i+2] = clampByte(b);
+  }
+
+  if(person.sharpness > 0){
+    applySoftSharpen(data, c.width, c.height, person.sharpness / 100);
+  }
+
+  cx.putImageData(img, 0, 0);
+  processedPersonCanvas = c;
+  processedPersonKey = key;
+  return c;
+}
+
+function applySoftSharpen(data, width, height, amount){
+  const copy = new Uint8ClampedArray(data);
+  const strength = clamp(amount, 0, .75);
+  for(let y=1; y<height-1; y++){
+    const row = y * width;
+    for(let x=1; x<width-1; x++){
+      const i = (row + x) * 4;
+      if(copy[i+3] < 8) continue;
+      for(let ch=0; ch<3; ch++){
+        const center = copy[i+ch] * 5;
+        const around = copy[i-4+ch] + copy[i+4+ch] + copy[i-width*4+ch] + copy[i+width*4+ch];
+        const sharp = center - around;
+        data[i+ch] = clampByte(copy[i+ch] * (1-strength) + sharp * strength);
+      }
+    }
+  }
+}
+
+function resetToneControls(showNotice = false){
+  person.brightness = 100;
+  person.contrast = 100;
+  person.saturation = 100;
+  person.temperature = 0;
+  person.tint = 0;
+  person.sharpness = 0;
+  const controls = {
+    brightnessRange: 100,
+    contrastRange: 100,
+    saturationRange: 100,
+    temperatureRange: 0,
+    tintRange: 0,
+    sharpnessRange: 0
+  };
+  Object.entries(controls).forEach(([id, value]) => { if($(id)) $(id).value = value; });
+  updateToneLabels();
+  invalidatePersonCache();
+  if(showNotice) showMobileToast("Đã reset màu ảnh về mặc định");
+}
+
+function updateToneLabels(){
+  if($("temperatureValue")) $("temperatureValue").textContent = person.temperature > 0 ? `+${person.temperature}` : String(person.temperature);
+  if($("tintValue")) $("tintValue").textContent = person.tint > 0 ? `+${person.tint}` : String(person.tint);
+  if($("sharpnessValue")) $("sharpnessValue").textContent = String(person.sharpness);
+}
+
+async function downscaleImageIfNeeded(img, maxEdge = MAX_PERSON_EDGE){
+  const edge = Math.max(img.width, img.height);
+  if(edge <= maxEdge) return img;
+  const ratio = maxEdge / edge;
+  const c = document.createElement("canvas");
+  c.width = Math.round(img.width * ratio);
+  c.height = Math.round(img.height * ratio);
+  const cx = c.getContext("2d", { alpha:true });
+  cx.imageSmoothingEnabled = true;
+  cx.imageSmoothingQuality = "high";
+  cx.drawImage(img, 0, 0, c.width, c.height);
+  const url = c.toDataURL("image/png", .96);
+  return srcToImage(url);
+}
+
+async function compressFileForRemoval(file){
+  const img = await fileToImage(file);
+  const small = await downscaleImageIfNeeded(img, MAX_REMOVE_BG_EDGE);
+  const c = document.createElement("canvas");
+  c.width = small.width;
+  c.height = small.height;
+  const cx = c.getContext("2d");
+  cx.drawImage(small, 0, 0);
+  const blob = await new Promise(resolve => c.toBlob(resolve, "image/jpeg", .92));
+  return new File([blob], (file.name || "person") + "-mobile.jpg", { type:"image/jpeg" });
+}
+
+function setRemoveBgStatus(text){
+  const el = $("removeBgStatus");
+  if(el) el.textContent = text;
+}
+
+function updateRemoveBgProgress({ visible = true, percent = 0, title = "Đang xử lý", hint = "", step = "prepare", mode = "ai" } = {}){
+  const card = $("removeBgProgressCard");
+  if(!card) return;
+  card.hidden = !visible;
+  card.classList.toggle("is-fallback", mode === "fallback");
+  card.classList.toggle("is-done", step === "done");
+  const safePercent = Math.max(0, Math.min(100, Math.round(percent || 0)));
+  const bar = $("removeBgProgressBar");
+  if(bar) bar.style.width = `${safePercent}%`;
+  const badge = $("removeBgPercentBadge");
+  if(badge) badge.textContent = `${safePercent}%`;
+  const titleEl = $("removeBgStepTitle");
+  if(titleEl) titleEl.textContent = title;
+  const hintEl = $("removeBgStepHint");
+  if(hintEl) hintEl.textContent = hint;
+  document.querySelectorAll("#removeBgSteps .step-chip").forEach((chip) => {
+    const chipStep = chip.dataset.step;
+    chip.classList.remove("active", "done");
+    const order = ["prepare", "download", "segment", "done"];
+    const currentIndex = order.indexOf(step);
+    const chipIndex = order.indexOf(chipStep);
+    if(chipIndex < currentIndex) chip.classList.add("done");
+    if(chipIndex === currentIndex) chip.classList.add("active");
+    if(step === "done" && chipIndex <= currentIndex) chip.classList.add("done");
+  });
+}
+
+function resetRemoveBgProgress(){
+  updateRemoveBgProgress({ visible:false, percent:0, title:"Sẵn sàng xóa nền", hint:"Tool sẽ hiện tiến trình rõ ràng từng bước để dễ theo dõi trên điện thoại.", step:"prepare", mode:"ai" });
+}
+
+function showMobileToast(text){
+  const el = $("mobileToast");
+  if(!el) return;
+  el.textContent = text;
+  el.classList.remove("hide");
+  clearTimeout(hideToastTimer);
+  hideToastTimer = setTimeout(() => el.classList.add("hide"), 2500);
+}
+
+function mobileQuickFit(){
+  if(!personImg){ alert("Upload ảnh nhân sự trước nha."); return; }
+  autoFitPerson();
+  person.scale = clamp(person.scale * 1.04, 0.2, 3);
+  $("scaleRange").value = person.scale;
+  showMobileToast("Đã canh nhanh cho màn điện thoại");
+}
+
 async function removeBackgroundInBrowser(){
   if(!personSourceFile){ alert("Upload ảnh nhân sự trước nha."); return; }
   const btn = $("btnRemoveBg");
   const old = btn.textContent;
   btn.textContent = "Đang xóa nền...";
   btn.disabled = true;
+  updateRemoveBgProgress({ visible:true, percent:6, title:"Chuẩn bị ảnh", hint:"Đang tối ưu ảnh để điện thoại xử lý nhẹ và mượt hơn.", step:"prepare", mode:"ai" });
+  setRemoveBgStatus("Đang chuẩn bị ảnh nhẹ hơn để iPhone xử lý mượt...");
   try{
+    const mobileFile = await compressFileForRemoval(personSourceFile);
+    updateRemoveBgProgress({ visible:true, percent:18, title:"Tải mô hình AI", hint:"Lần đầu có thể mất 10–30 giây tùy mạng. Những lần sau sẽ nhanh hơn.", step:"download", mode:"ai" });
+    setRemoveBgStatus("Đang tải AI xóa nền trong trình duyệt...");
     const mod = await import("https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm");
-    const blob = await mod.removeBackground(personSourceFile);
+    let reachedInference = false;
+    const blob = await mod.removeBackground(mobileFile, {
+      progress: (key, current, total) => {
+        if(total){
+          const pct = 18 + Math.round((current / total) * 47);
+          updateRemoveBgProgress({ visible:true, percent:pct, title:"Tải mô hình AI", hint:"Đang tải các thành phần xóa nền cho trình duyệt.", step:"download", mode:"ai" });
+          setRemoveBgStatus(`Đang tải AI xóa nền: ${Math.round(current / total * 100)}%`);
+        } else if(!reachedInference) {
+          reachedInference = true;
+          updateRemoveBgProgress({ visible:true, percent:74, title:"Đang tách nền", hint:"AI đang nhận diện chủ thể và xử lý nền. Vui lòng chờ một chút.", step:"segment", mode:"ai" });
+          setRemoveBgStatus("Đang tách nền bằng AI...");
+        }
+      }
+    });
+    updateRemoveBgProgress({ visible:true, percent:90, title:"Hoàn thiện ảnh", hint:"Đang đưa ảnh đã tách nền vào poster và canh lại avatar.", step:"segment", mode:"ai" });
     const url = URL.createObjectURL(blob);
     personImg = await srcToImage(url);
+    personImg = await downscaleImageIfNeeded(personImg, MAX_PERSON_EDGE);
     person.bounds = getAlphaBounds(personImg);
+    invalidatePersonCache();
     autoFitPerson();
+    updateRemoveBgProgress({ visible:true, percent:100, title:"Xóa nền hoàn tất", hint:"Avatar đã sẵn sàng. Bây giờ có thể kéo hoặc chụm để căn lại cho đẹp.", step:"done", mode:"ai" });
+    setRemoveBgStatus("Đã xóa nền AI xong. Có thể kéo/chụm để căn avatar.");
+    showMobileToast("Đã xóa nền xong • Kéo/chụm để căn ảnh");
     render();
   }catch(err){
-    console.error(err);
-    alert("Chưa xóa nền được trên trình duyệt này. Có thể do mạng/CDN hoặc ảnh quá nặng.");
+    console.warn("AI remove background failed, fallback to local edge matting", err);
+    try{
+      updateRemoveBgProgress({ visible:true, percent:32, title:"Chuyển sang chế độ dự phòng", hint:"AI/CDN đang chậm hoặc lỗi. Tool sẽ dùng thuật toán fallback ngay trên máy để tiếp tục.", step:"prepare", mode:"fallback" });
+      setRemoveBgStatus("AI/CDN chưa chạy được, đang dùng thuật toán fallback nhẹ trên máy...");
+      const rawImg = await fileToImage(personSourceFile);
+      updateRemoveBgProgress({ visible:true, percent:58, title:"Phân tích nền", hint:"Đang quét viền và ước lượng vùng nền để tách nhanh trên điện thoại.", step:"download", mode:"fallback" });
+      const smallImg = await downscaleImageIfNeeded(rawImg, MAX_REMOVE_BG_EDGE);
+      updateRemoveBgProgress({ visible:true, percent:78, title:"Đang tách nền fallback", hint:"Thuật toán fallback đang xử lý. Kết quả đẹp nhất khi ảnh có nền đơn giản hoặc tương phản tốt.", step:"segment", mode:"fallback" });
+      const fallbackCanvas = smartFallbackRemoveBackground(smallImg);
+      personImg = await srcToImage(fallbackCanvas.toDataURL("image/png"));
+      personImg = await downscaleImageIfNeeded(personImg, MAX_PERSON_EDGE);
+      person.bounds = getAlphaBounds(personImg);
+      invalidatePersonCache();
+      autoFitPerson();
+      updateRemoveBgProgress({ visible:true, percent:100, title:"Fallback hoàn tất", hint:"Đã tách nền bằng thuật toán dự phòng. Nếu ảnh có nền phức tạp, có thể thử lại bằng ảnh nền đơn giản hơn để sạch hơn.", step:"done", mode:"fallback" });
+      setRemoveBgStatus("Đã xóa nền bằng fallback. Với nền quá phức tạp, nên dùng ảnh chụp nền đơn sắc để sạch hơn.");
+      showMobileToast("Đã xóa nền fallback • Kéo/chụm để căn ảnh");
+      render();
+    }catch(fallbackErr){
+      console.error(fallbackErr);
+      updateRemoveBgProgress({ visible:true, percent:100, title:"Chưa xóa nền được", hint:"Hãy thử ảnh nhẹ hơn, mạng ổn định hơn hoặc dùng ảnh có nền rõ chủ thể hơn rồi bấm lại.", step:"done", mode:"fallback" });
+      setRemoveBgStatus("Chưa xóa nền được. Hãy thử ảnh nhẹ hơn hoặc mạng ổn định hơn rồi bấm lại.");
+      alert("Chưa xóa nền được trên trình duyệt này. Hạnh thử ảnh nhẹ hơn hoặc mạng ổn định hơn nha.");
+    }
   }finally{
     btn.textContent = old;
     btn.disabled = false;
   }
 }
+
+function smartFallbackRemoveBackground(img){
+  const c = document.createElement("canvas");
+  c.width = img.width;
+  c.height = img.height;
+  const cx = c.getContext("2d", { willReadFrequently:true });
+  cx.drawImage(img, 0, 0);
+  const image = cx.getImageData(0, 0, c.width, c.height);
+  const data = image.data;
+  const w = c.width, h = c.height;
+
+  const bg = estimateBorderColor(data, w, h);
+  const visited = new Uint8Array(w * h);
+  const queue = [];
+  const threshold = Math.max(34, Math.min(92, bg.std * 2.2 + 28));
+  const push = (x,y) => {
+    if(x<0 || y<0 || x>=w || y>=h) return;
+    const idx = y*w+x;
+    if(visited[idx]) return;
+    const di = idx*4;
+    const d = colorDistance(data[di], data[di+1], data[di+2], bg.r, bg.g, bg.b);
+    if(d <= threshold){
+      visited[idx] = 1;
+      queue.push(idx);
+    }
+  };
+  for(let x=0; x<w; x+=2){ push(x,0); push(x,h-1); }
+  for(let y=0; y<h; y+=2){ push(0,y); push(w-1,y); }
+
+  let head = 0;
+  while(head < queue.length){
+    const idx = queue[head++];
+    const x = idx % w;
+    const y = (idx / w) | 0;
+    push(x+1,y); push(x-1,y); push(x,y+1); push(x,y-1);
+  }
+
+  // Alpha matting nhẹ: nền chắc chắn = trong suốt, vùng viền feather để đỡ răng cưa.
+  for(let y=0; y<h; y++){
+    for(let x=0; x<w; x++){
+      const idx = y*w+x;
+      const i = idx*4;
+      if(visited[idx]){
+        data[i+3] = 0;
+      }else{
+        const d = colorDistance(data[i], data[i+1], data[i+2], bg.r, bg.g, bg.b);
+        const edge = clamp((d - threshold) / 38, 0, 1);
+        if(edge < 1) data[i+3] = Math.round(data[i+3] * (0.25 + edge * 0.75));
+      }
+    }
+  }
+  featherAlpha(data, w, h, 1);
+  cx.putImageData(image, 0, 0);
+  return c;
+}
+
+function estimateBorderColor(data, w, h){
+  const samples = [];
+  const step = Math.max(1, Math.floor(Math.min(w,h) / 80));
+  for(let x=0; x<w; x+=step){
+    samples.push(pixelRGB(data, x, 0, w));
+    samples.push(pixelRGB(data, x, h-1, w));
+  }
+  for(let y=0; y<h; y+=step){
+    samples.push(pixelRGB(data, 0, y, w));
+    samples.push(pixelRGB(data, w-1, y, w));
+  }
+  const r = median(samples.map(p => p[0]));
+  const g = median(samples.map(p => p[1]));
+  const b = median(samples.map(p => p[2]));
+  const distances = samples.map(p => colorDistance(p[0], p[1], p[2], r, g, b));
+  return { r, g, b, std: median(distances) };
+}
+
+function pixelRGB(data, x, y, w){
+  const i = (y*w+x)*4;
+  return [data[i], data[i+1], data[i+2]];
+}
+
+function median(arr){
+  const a = arr.slice().sort((x,y)=>x-y);
+  return a[(a.length/2)|0] || 0;
+}
+
+function colorDistance(r1,g1,b1,r2,g2,b2){
+  const dr = r1-r2, dg = g1-g2, db = b1-b2;
+  return Math.sqrt(dr*dr*.9 + dg*dg*1.15 + db*db*.95);
+}
+
+function featherAlpha(data, w, h, radius = 1){
+  const alpha = new Uint8ClampedArray(w*h);
+  for(let i=0, p=0; i<data.length; i+=4, p++) alpha[p] = data[i+3];
+  for(let y=0; y<h; y++){
+    for(let x=0; x<w; x++){
+      let sum=0, count=0;
+      for(let yy=-radius; yy<=radius; yy++){
+        for(let xx=-radius; xx<=radius; xx++){
+          const nx=x+xx, ny=y+yy;
+          if(nx<0 || ny<0 || nx>=w || ny>=h) continue;
+          sum += alpha[ny*w+nx]; count++;
+        }
+      }
+      data[(y*w+x)*4+3] = Math.round(sum / count);
+    }
+  }
+}
+
 
 function nudge(dir){
   const step = 15;
@@ -998,7 +1436,17 @@ function nudge(dir){
 }
 
 function pointerDown(e){
+  e.preventDefault();
+  try { canvas.setPointerCapture(e.pointerId); } catch(err) {}
   const p = canvasPoint(e);
+  activePointers.set(e.pointerId, p);
+
+  if(activePointers.size === 2 && personImg && activeTab === "leader"){
+    startPinchGesture();
+    showMobileToast("Đang zoom avatar bằng 2 ngón");
+    return;
+  }
+
   if(activeTab === "admin"){
     const hit = hitTextBox(p.x, p.y);
     if(hit){
@@ -1027,16 +1475,22 @@ function pointerDown(e){
   }
 
   if(!personImg) return;
-  const w = personImg.width * person.scale;
-  const h = personImg.height * person.scale;
-  if(p.x >= person.x && p.x <= person.x+w && p.y >= person.y && p.y <= person.y+h){
+  if(hitPersonImage(p.x, p.y)){
     draggingPerson = true;
     dragStart = { x:p.x, y:p.y, px:person.x, py:person.y };
+    showMobileToast("Kéo để chỉnh vị trí avatar");
   }
 }
 
 function pointerMove(e){
   const p = canvasPoint(e);
+  if(activePointers.has(e.pointerId)) activePointers.set(e.pointerId, p);
+
+  if(pinchState && activePointers.size >= 2){
+    updatePinchGesture();
+    return;
+  }
+
   if(draggingText){
     const field = template.textFields.find(f => f.key === selectedTextKey);
     if(!field) return;
@@ -1078,6 +1532,72 @@ function pointerMove(e){
   updateCanvasCursor(p);
 }
 
+function pointerUp(e){
+  if(e?.pointerId !== undefined){
+    activePointers.delete(e.pointerId);
+    try { canvas.releasePointerCapture(e.pointerId); } catch(err) {}
+  }
+  if(pinchState && activePointers.size < 2){
+    pinchState = null;
+    syncPersonControls();
+  }
+  if(activePointers.size === 0){
+    const wasDragging = draggingPerson || draggingText || draggingSlot || resizingSlot;
+    draggingPerson = false;
+    draggingText = false;
+    draggingSlot = false;
+    resizingSlot = false;
+    if(snapState.active) snapState.active = false;
+    if(wasDragging) render();
+  }
+}
+
+function pointerLeave(e){
+  if(e.pointerType === "mouse") resetDragAndSnap();
+}
+
+function startPinchGesture(){
+  const pts = [...activePointers.values()].slice(0, 2);
+  const center = midpoint(pts[0], pts[1]);
+  pinchState = {
+    startDistance: distance(pts[0], pts[1]) || 1,
+    startScale: person.scale,
+    anchorX: (center.x - person.x) / person.scale,
+    anchorY: (center.y - person.y) / person.scale
+  };
+  draggingPerson = false;
+}
+
+function updatePinchGesture(){
+  const pts = [...activePointers.values()].slice(0, 2);
+  const center = midpoint(pts[0], pts[1]);
+  const ratio = distance(pts[0], pts[1]) / pinchState.startDistance;
+  const nextScale = clamp(pinchState.startScale * ratio, 0.2, 3);
+  person.scale = nextScale;
+  person.x = center.x - pinchState.anchorX * nextScale;
+  person.y = center.y - pinchState.anchorY * nextScale;
+  syncPersonControls();
+  render();
+}
+
+function syncPersonControls(){
+  if($("scaleRange")) $("scaleRange").value = person.scale;
+}
+
+function midpoint(a,b){ return { x:(a.x+b.x)/2, y:(a.y+b.y)/2 }; }
+function distance(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+
+function hitPersonImage(x, y){
+  if(!personImg) return false;
+  const b = person.bounds || { x:0, y:0, width:personImg.width, height:personImg.height };
+  const left = person.x + b.x * person.scale;
+  const top = person.y + b.y * person.scale;
+  const right = left + b.width * person.scale;
+  const bottom = top + b.height * person.scale;
+  const pad = 32;
+  return x >= left - pad && x <= right + pad && y >= top - pad && y <= bottom + pad;
+}
+
 function applyTextSnap(field, rawX){
   if(field.snapToCenter === false || (field.align || "center") !== "center") return { snapped:false, x:rawX };
   const centerX = canvas.width / 2;
@@ -1094,13 +1614,9 @@ function updateCanvasCursor(p){
     if(slotHit === "resize") { canvas.style.cursor = "nwse-resize"; return; }
     if(slotHit === "body") { canvas.style.cursor = "move"; return; }
   }
-  if(personImg){
-    const w = personImg.width * person.scale;
-    const h = personImg.height * person.scale;
-    if(p.x >= person.x && p.x <= person.x+w && p.y >= person.y && p.y <= person.y+h){
-      canvas.style.cursor = "grab";
-      return;
-    }
+  if(personImg && hitPersonImage(p.x, p.y)){
+    canvas.style.cursor = "grab";
+    return;
   }
   canvas.style.cursor = "default";
 }
@@ -1141,25 +1657,85 @@ function canvasPoint(e){
   };
 }
 
-function exportPNG(){
+async function exportPNG(){
+  try{
+    const blob = await makePosterBlob();
+    if(isIOS){
+      const shared = await sharePosterBlob(blob, true);
+      if(!shared) openBlobPreviewForIOS(blob);
+      return;
+    }
+    downloadBlob(blob, `poster-${Date.now()}.png`);
+  }catch(err){
+    console.error(err);
+    alert("Chưa xuất được poster. Hạnh thử bấm lại nha.");
+  }
+}
+
+async function sharePosterPNG(){
+  try{
+    const blob = await makePosterBlob();
+    const shared = await sharePosterBlob(blob, false);
+    if(!shared){
+      if(isIOS) openBlobPreviewForIOS(blob);
+      else downloadBlob(blob, `poster-${Date.now()}.png`);
+    }
+  }catch(err){
+    console.error(err);
+    alert("Thiết bị/trình duyệt này chưa hỗ trợ chia sẻ trực tiếp. Tool sẽ tải file PNG thay thế.");
+  }
+}
+
+function makePosterBlob(){
   const originalShowSlot = showSlot;
   const originalShowTextGuides = showTextGuides;
   const originalSnap = snapState.active;
+  const originalExportCleanMode = exportCleanMode;
   showSlot = false;
   showTextGuides = false;
   snapState.active = false;
+  exportCleanMode = true;
   render();
-  canvas.toBlob(blob => {
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `poster-${Date.now()}.png`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    showSlot = originalShowSlot;
-    showTextGuides = originalShowTextGuides;
-    snapState.active = originalSnap;
-    render();
-  }, "image/png", 1);
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      showSlot = originalShowSlot;
+      showTextGuides = originalShowTextGuides;
+      snapState.active = originalSnap;
+      exportCleanMode = originalExportCleanMode;
+      render();
+      if(blob) resolve(blob);
+      else reject(new Error("Không tạo được PNG blob"));
+    }, "image/png", 1);
+  });
+}
+
+async function sharePosterBlob(blob, quiet = false){
+  const file = new File([blob], `poster-${Date.now()}.png`, { type:"image/png" });
+  if(navigator.canShare && navigator.canShare({ files:[file] }) && navigator.share){
+    await navigator.share({ files:[file], title:"Unite Poster", text:"Poster vinh danh Unite Group" });
+    if(!quiet) showMobileToast("Đã mở bảng chia sẻ");
+    return true;
+  }
+  return false;
+}
+
+function openBlobPreviewForIOS(blob){
+  const url = URL.createObjectURL(blob);
+  const opened = window.open(url, "_blank");
+  if(opened){
+    showMobileToast("Nhấn giữ ảnh rồi chọn Lưu vào Ảnh");
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }else{
+    downloadBlob(blob, `poster-${Date.now()}.png`);
+  }
+}
+
+function downloadBlob(blob, filename){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
 function downloadJSON(obj, filename){
@@ -1197,6 +1773,7 @@ function srcToImage(src){
 
 function waitImage(img){ return img.complete ? Promise.resolve() : new Promise(res => img.onload = res); }
 function clamp(n,min,max){ return Math.max(min, Math.min(max, n)); }
+function clampByte(n){ return Math.max(0, Math.min(255, Math.round(n))); }
 function toHex(color){ return /^#/.test(color) ? color : '#ffffff'; }
 function isSelected(current, value){ return String(current || "") === String(value) ? "selected" : ""; }
 function escapeHtml(str){ return String(str).replace(/[&<>"']/g, s => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[s])); }
