@@ -146,8 +146,10 @@ let bgSourceFile = null;
 let fgSourceFile = null;
 let selectedFontFiles = [];
 let showSlot = true;
+let leaderGuidesVisible = true;
 let showTextGuides = true;
 let activeTab = "leader";
+let cloudStatusState = "warn";
 let cloudTemplates = [];
 let selectedCloudSlug = null;
 let currentProfile = null;
@@ -217,6 +219,9 @@ async function init(){
   }
 
   await applyCurrentTemplate();
+  syncLeaderGuideButton();
+  syncModeSwitchButton();
+  syncCompactToolbarLabels();
   await refreshAuthStatus();
 }
 
@@ -271,18 +276,7 @@ function setupCanvas(){
 
 function bindEvents(){
   document.querySelectorAll(".tab").forEach(btn => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".tab").forEach(b => b.classList.remove("active"));
-      document.querySelectorAll(".tab-pane").forEach(p => p.classList.remove("active"));
-      btn.classList.add("active");
-      $(`${btn.dataset.tab}Tab`).classList.add("active");
-      activeTab = btn.dataset.tab;
-      $("canvasHint").textContent = activeTab === "admin"
-        ? "Admin: kéo chữ, kéo vùng người hoặc kéo nút resize ở góc phải dưới."
-        : "Leader: kéo ảnh người, chụm 2 ngón để zoom trên điện thoại.";
-      snapState.active = false;
-      render();
-    });
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
   });
 
   $("personUpload").addEventListener("change", async (e) => {
@@ -351,8 +345,8 @@ function bindEvents(){
 
   $("btnAutoFit").addEventListener("click", () => { autoFitPerson(); render(); showMobileToast("Đã tự căn vào khung avatar"); });
   $("btnMobileFit").addEventListener("click", () => { mobileQuickFit(); render(); });
-  $("btnExport").addEventListener("click", exportPNG);
-  $("btnSharePoster").addEventListener("click", sharePosterPNG);
+  $("btnExport").addEventListener("click", handleTopPrimaryAction);
+  $("btnSharePoster").addEventListener("click", handleTopSecondaryAction);
   $("btnRemoveBg").addEventListener("click", removeBackgroundInBrowser);
   $("btnResetTone").addEventListener("click", () => { resetToneControls(true); render(); });
 
@@ -384,13 +378,48 @@ function bindEvents(){
   $("btnLoadSelectedCloud").addEventListener("click", loadSelectedCloudTemplate);
   $("btnArchiveCloud").addEventListener("click", onArchiveSelectedCloud);
   $("btnReloadActiveCloud").addEventListener("click", reloadActiveCloudTemplate);
+  if($("btnHideIosTip")) $("btnHideIosTip").addEventListener("click", () => { const panel = $("iosSavePanel"); if(panel) panel.hidden = true; });
+  if($("btnToggleGuides")) $("btnToggleGuides").addEventListener("click", () => {
+    leaderGuidesVisible = !leaderGuidesVisible;
+    syncLeaderGuideButton();
+    render();
+  });
+  if($("brandAdminTrigger")) {
+    const toggleAdminFromLogo = () => {
+      switchTab(activeTab === "admin" ? "leader" : "admin");
+      showMobileToast(activeTab === "admin" ? "Đã mở Admin • Đăng nhập Supabase nếu cần" : "Đã về chế độ tạo poster");
+    };
+    $("brandAdminTrigger").addEventListener("click", toggleAdminFromLogo);
+    $("brandAdminTrigger").addEventListener("keydown", (e) => {
+      if(e.key === "Enter" || e.key === " "){
+        e.preventDefault();
+        toggleAdminFromLogo();
+      }
+    });
+  }
 
   canvas.addEventListener("pointerdown", pointerDown);
   canvas.addEventListener("pointermove", pointerMove);
   canvas.addEventListener("pointerleave", pointerLeave);
   canvas.addEventListener("pointercancel", pointerUp);
   window.addEventListener("pointerup", pointerUp);
-  window.addEventListener("resize", () => showMobileToast("Kéo 1 ngón • Chụm 2 ngón để zoom"));
+  window.addEventListener("resize", () => { syncCompactToolbarLabels(); showMobileToast("Kéo 1 ngón • Chụm 2 ngón để zoom"); });
+}
+
+async function handleTopPrimaryAction(){
+  if(activeTab === "admin"){
+    await onSaveCloud("active");
+    return;
+  }
+  await exportPNG();
+}
+
+async function handleTopSecondaryAction(){
+  if(activeTab === "admin"){
+    await onSaveCloud("draft");
+    return;
+  }
+  await sharePosterPNG();
 }
 
 async function refreshAuthStatus(){
@@ -578,12 +607,89 @@ function setAuthStatus(html, ok=false){
 
 function setCloudStatus(text, state='warn'){
   const el = $("cloudStatus");
+  if(!el) return;
+  cloudStatusState = state;
+  el.dataset.fulltext = text;
   el.textContent = text;
-  el.className = `pill ${state}`;
+  el.className = `pill compact-pill ${state}`;
+  syncCompactToolbarLabels();
 }
 
 function setPublicTemplateInfo(html){
   $("publicTemplateInfo").innerHTML = html;
+}
+
+function syncLeaderGuideButton(){
+  const btn = $("btnToggleGuides");
+  if(!btn) return;
+  btn.classList.toggle("active", leaderGuidesVisible);
+  btn.textContent = leaderGuidesVisible ? "Khung: Bật" : "Khung: Tắt";
+  syncCompactToolbarLabels();
+}
+
+function syncModeSwitchButton(){
+  const btn = $("btnModeSwitch");
+  if(!btn) return;
+  const isAdmin = activeTab === "admin";
+  btn.textContent = isAdmin ? "Poster" : "Admin";
+  btn.classList.toggle("admin-active", isAdmin);
+  syncCompactToolbarLabels();
+}
+
+function syncCompactToolbarLabels(){
+  const mobile = window.innerWidth <= 900;
+  const modeBtn = $("btnModeSwitch");
+  const guideBtn = $("btnToggleGuides");
+  const shareBtn = $("btnSharePoster");
+  const exportBtn = $("btnExport");
+  const cloudEl = $("cloudStatus");
+  const heading = document.querySelector('.stage-head strong');
+  if(heading) heading.textContent = mobile ? 'Preview' : 'Preview poster';
+  if(modeBtn) modeBtn.textContent = mobile ? (activeTab === 'admin' ? 'Post' : 'Ad') : (activeTab === 'admin' ? 'Poster' : 'Admin');
+  if(guideBtn) guideBtn.textContent = mobile ? 'Khung' : (leaderGuidesVisible ? 'Khung: Bật' : 'Khung: Tắt');
+  if(shareBtn){
+    shareBtn.textContent = activeTab === 'admin'
+      ? (mobile ? 'Nháp' : 'Lưu nháp')
+      : (mobile ? 'Share' : 'Chia sẻ');
+    shareBtn.title = activeTab === 'admin' ? 'Lưu chỉnh sửa admin dạng Draft' : 'Chia sẻ poster';
+  }
+  if(exportBtn){
+    exportBtn.textContent = activeTab === 'admin'
+      ? (mobile ? 'Active' : 'Lưu Active')
+      : (mobile ? 'PNG' : 'Xuất PNG');
+    exportBtn.title = activeTab === 'admin' ? 'Lưu chỉnh sửa admin thành template Active' : 'Xuất poster PNG';
+  }
+  if(cloudEl){
+    const fullText = cloudEl.dataset.fulltext || cloudEl.textContent || '';
+    cloudEl.title = fullText;
+    if(mobile){
+      let shortText = '☁';
+      if(cloudStatusState === 'good') shortText = '☁ On';
+      else if(cloudStatusState === 'warn') shortText = '☁ Wait';
+      else if(cloudStatusState === 'bad') shortText = '☁ Err';
+      cloudEl.textContent = shortText;
+    } else {
+      cloudEl.textContent = fullText;
+    }
+  }
+}
+
+function switchTab(tabName){
+  const safeTab = tabName === "admin" ? "admin" : "leader";
+  document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.tab === safeTab));
+  document.querySelectorAll(".tab-pane").forEach(p => p.classList.toggle("active", p.id === `${safeTab}Tab`));
+  activeTab = safeTab;
+  const hint = $("canvasHint");
+  if(hint){
+    hint.textContent = activeTab === "admin"
+      ? "Admin: kéo chữ, kéo vùng người hoặc kéo nút resize ở góc phải dưới."
+      : "Leader: kéo ảnh người, chụm 2 ngón để zoom trên điện thoại.";
+  }
+  syncModeSwitchButton();
+  syncLeaderGuideButton();
+  syncCompactToolbarLabels();
+  snapState.active = false;
+  render();
 }
 
 function syncTemplateMetaInputs(){
@@ -788,7 +894,11 @@ function render(){
 
   if(personImg){
     const drawable = getProcessedPersonDrawable();
+    const slotBottom = template.personSlot.y + template.personSlot.height;
     ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, canvas.width, slotBottom);
+    ctx.clip();
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(drawable, person.x, person.y, drawable.width * person.scale, drawable.height * person.scale);
@@ -798,8 +908,8 @@ function render(){
   if(fgImg) drawCover(fgImg, 0, 0, canvas.width, canvas.height);
   drawDynamicText();
   if(activeTab === "admin" && showTextGuides) drawTextGuides();
-  if(showSlot) drawPersonSlotGuide();
-  if(personImg && activeTab === "leader" && !exportCleanMode) drawPersonTransformGuide();
+  if(activeTab === "admin" && showSlot) drawPersonSlotGuide();
+  if(personImg && activeTab === "leader" && leaderGuidesVisible && !exportCleanMode) drawPersonTransformGuide();
   if(snapState.active && !exportCleanMode) drawCenterSnapFeedback();
 }
 

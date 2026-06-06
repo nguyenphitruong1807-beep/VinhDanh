@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Unite Poster Studio Pro v6.1</title>
+  <title>Unite Poster Studio Pro v6.1.7</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Montserrat:wght@600;700;800;900&family=Playfair+Display:wght@600;700;800&display=swap" rel="stylesheet">
@@ -12,17 +12,13 @@
 <body>
   <header class="app-header">
     <div class="brand-block">
-      <img class="brand-logo" src="assets/unite-group-logo.png" alt="Unite Group" />
+      <img id="brandAdminTrigger" class="brand-logo" src="assets/unite-group-logo.png" alt="Unite Group" title="Nhấn để chuyển Admin/Poster" role="button" tabindex="0" />
       <div>
         <h1>Unite Poster Studio</h1>
         <p>Giao diện tối giản, tối ưu thao tác nhanh trên điện thoại và iPhone.</p>
       </div>
     </div>
-    <div class="topbar-actions">
-      <span id="cloudStatus" class="pill">Cloud: đang kiểm tra...</span>
-      <button id="btnSharePoster" class="soft mini">Chia sẻ</button>
-      <button id="btnExport" class="primary">Xuất PNG</button>
-    </div>
+
   </header>
 
   <main class="workspace">
@@ -32,7 +28,13 @@
           <strong>Preview poster</strong>
           <span id="canvasSize"></span>
         </div>
-        <span id="canvasHint" class="hint">Kéo avatar bằng 1 ngón, chụm 2 ngón để zoom.</span>
+        <div class="stage-head-actions compact-preview-actions">
+          <button id="btnToggleGuides" type="button" class="soft mini stage-guide-btn active">Khung: Bật</button>
+          <span id="cloudStatus" class="pill compact-pill">Cloud: đang kiểm tra...</span>
+          <button id="btnSharePoster" class="soft mini compact-action-btn">Chia sẻ</button>
+          <button id="btnExport" class="primary compact-action-btn">Xuất PNG</button>
+          <span id="canvasHint" class="hint visually-hidden">Kéo avatar bằng 1 ngón, chụm 2 ngón để zoom.</span>
+        </div>
       </div>
 
       <div class="canvas-shell">
@@ -41,7 +43,8 @@
       </div>
 
       <div id="iosSavePanel" class="ios-save-panel" hidden>
-        <b>iPhone/iPad:</b> nếu bảng chia sẻ không mở, hãy mở ảnh poster rồi nhấn giữ ảnh để chọn <b>Lưu vào Ảnh</b>.
+        <div class="ios-save-copy"><b>iPhone/iPad:</b> nếu bảng chia sẻ không mở, hãy mở ảnh poster rồi nhấn giữ ảnh để chọn <b>Lưu vào Ảnh</b>.</div>
+        <button id="btnHideIosTip" type="button" class="ios-tip-close" aria-label="Ẩn hướng dẫn lưu ảnh">Ẩn</button>
       </div>
     </section>
 

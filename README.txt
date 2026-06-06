@@ -41,3 +41,37 @@ NÂNG CẤP V6.1
 - Thay logo header bằng logo Unite Group theo mẫu cung cấp.
 - Thêm tiến trình xóa nền trực quan: thanh tiến trình, % hoàn thành, từng bước xử lý.
 - Hiển thị rõ chế độ AI và fallback để người dùng trên điện thoại dễ theo dõi.
+
+
+NÂNG CẤP V6.1.3
+- Ẩn khung PERSON SLOT ở chế độ Leader để giao diện preview sạch hơn.
+- Thêm nút bật/tắt khung chỉnh ngay tại phần preview.
+- Mặc định chỉ hiện khung vàng avatar khi chỉnh, admin vẫn giữ đầy đủ guide để canh template.
+
+
+NÂNG CẤP V6.1.4
+- Chuyển Cloud / Chia sẻ / Xuất PNG thành cụm nút nhỏ gọn ngay trên khung preview poster.
+- Ẩn tab Tạo poster / Admin trên mobile, thay bằng nút chuyển chế độ nhỏ gọn.
+- Có thể chạm nút Admin nhỏ hoặc double tap logo Unite để mở/tắt chế độ Admin.
+- Ẩn dòng hướng dẫn dài cạnh preview để giao diện thoáng hơn.
+
+
+NÂNG CẤP V6.1.5
+- Thu gọn thêm cụm nút trên preview cho mobile.
+- Rút gọn text thành Preview / Ad / Khung / Share / PNG / ☁ On khi ở điện thoại.
+- Giảm chiều cao và padding của toàn bộ action bar để ít chiếm chỗ hơn.
+- Với màn hình rất hẹp, cụm nút chuyển sang dạng hàng ngang siêu gọn, có thể vuốt ngang nếu cần.
+
+
+NÂNG CẤP V6.1.6
+- Bỏ nút Admin khỏi cụm nút trên preview để không bị vướng vùng poster/người.
+- Gộp chuyển mode Admin/Poster vào logo Unite: nhấn logo để đổi chế độ.
+- Khi vào Admin, người dùng đăng nhập Supabase trong tab Admin như cũ.
+- Giữ cụm nút còn lại gọn: Khung / Cloud / Share / PNG.
+
+
+NÂNG CẤP V6.1.7
+- Khi đang ở chế độ Admin, nút Chia sẻ đổi thành Lưu nháp và nút Xuất PNG đổi thành Lưu Active.
+- Khi ở chế độ Poster/Leader, hai nút này trở về đúng chức năng Chia sẻ và Xuất PNG.
+- Nhấn logo Unite để chuyển qua lại Poster/Admin như bản trước.
+- Lưu Active sẽ lưu chỉnh sửa khung, chữ, person slot, layer và template lên Supabase để leader dùng chung.
