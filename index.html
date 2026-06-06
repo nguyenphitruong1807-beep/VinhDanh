@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Unite Poster Generator v4</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&family=Montserrat:wght@600;700;800;900&family=Playfair+Display:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Unite Poster Generator v4</h1>
+      <p>Đã gắn Supabase: admin lưu template thật lên cloud, leader mở link là load template active mới nhất.</p>
+    </div>
+    <div class="topbar-actions">
+      <span id="cloudStatus" class="pill">Cloud: đang kiểm tra...</span>
+      <button id="btnExport" class="primary">Tải poster PNG</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel controls">
+      <div class="tabs">
+        <button class="tab active" data-tab="leader">Leader tạo poster</button>
+        <button class="tab" data-tab="admin">Admin template</button>
+      </div>
+
+      <div id="leaderTab" class="tab-pane active">
+        <div class="section-card compact">
+          <div class="section-head">
+            <h2>Template cloud</h2>
+            <button id="btnReloadActiveCloud" class="soft mini">Load template active</button>
+          </div>
+          <p class="note">Khi leader mở tool, hệ thống sẽ tự thử lấy template active từ Supabase trước.</p>
+          <div id="publicTemplateInfo" class="cloud-box mini-box">Chưa có dữ liệu template cloud.</div>
+        </div>
+
+        <h2>1. Ảnh nhân sự</h2>
+        <label class="filebox">
+          <input id="personUpload" type="file" accept="image/*" />
+          <span>Upload ảnh nhân sự</span>
+        </label>
+
+        <div class="row two">
+          <button id="btnRemoveBg" class="soft">Xóa nền AI thử nghiệm</button>
+          <button id="btnAutoFit" class="soft">Tự căn người</button>
+        </div>
+        <p class="note">Xóa nền AI chạy trực tiếp trên trình duyệt. Nếu ảnh nặng thì xử lý sẽ lâu hơn một chút.</p>
+
+        <h2>2. Chỉnh ảnh người</h2>
+        <label>Phóng to / thu nhỏ
+          <input id="scaleRange" type="range" min="0.2" max="3" step="0.01" value="1" />
+        </label>
+        <label>Làm sáng
+          <input id="brightnessRange" type="range" min="60" max="150" step="1" value="100" />
+        </label>
+        <label>Tương phản
+          <input id="contrastRange" type="range" min="70" max="150" step="1" value="100" />
+        </label>
+
+        <div class="nudge-grid">
+          <span></span><button data-nudge="up">↑</button><span></span>
+          <button data-nudge="left">←</button><button data-nudge="reset">Reset</button><button data-nudge="right">→</button>
+          <span></span><button data-nudge="down">↓</button><span></span>
+        </div>
+
+        <h2>3. Nội dung chữ</h2>
+        <p class="note">Tên giải lớn như BEST SELLER có thể đổi thành BEST LEADER, TOP REVENUE, NGÔI SAO THÁNG...</p>
+        <div id="textForm" class="text-form"></div>
+      </div>
+
+      <div id="adminTab" class="tab-pane">
+        <div class="section-card">
+          <div class="section-head">
+            <h2>Supabase Admin</h2>
+            <button id="btnRefreshProfile" class="soft mini">Kiểm tra đăng nhập</button>
+          </div>
+          <div id="authStatus" class="auth-status">Chưa đăng nhập admin.</div>
+          <div class="grid2 auth-grid">
+            <label>Email admin
+              <input id="adminEmail" type="text" placeholder="vd: nguyenphitruong1807@gmail.com" />
+            </label>
+            <label>Mật khẩu
+              <input id="adminPassword" type="password" placeholder="Nhập mật khẩu Supabase Auth" />
+            </label>
+          </div>
+          <div class="row two">
+            <button id="btnAdminLogin" class="primary ghost-gold">Đăng nhập admin</button>
+            <button id="btnAdminLogout" class="soft">Đăng xuất</button>
+          </div>
+          <p class="note">Chỉ tài khoản có role = admin trong bảng profiles mới lưu template / upload file lên cloud được.</p>
+        </div>
+
+        <div class="section-card">
+          <div class="section-head">
+            <h2>Cloud template</h2>
+            <div class="row-actions">
+              <button id="btnReloadCloudList" class="soft mini">Làm mới danh sách</button>
+              <button id="btnLoadSelectedCloud" class="soft mini">Nạp template đã chọn</button>
+            </div>
+          </div>
+          <div id="cloudTemplatesList" class="cloud-list"></div>
+        </div>
+
+        <div class="section-card">
+          <h2>Thông tin template</h2>
+          <div class="grid2">
+            <label>Template ID / slug
+              <input id="templateIdInput" type="text" />
+            </label>
+            <label>Tên template
+              <input id="templateNameInput" type="text" />
+            </label>
+          </div>
+          <p class="note">Khi lưu cloud, tool sẽ dùng templateId để tạo slug chính. Nên đặt dễ nhớ, ví dụ: best-seller-thang-5-2026.</p>
+        </div>
+
+        <div class="section-card">
+          <h2>Template local</h2>
+          <label class="filebox">
+            <input id="templateUpload" type="file" accept="application/json" />
+            <span>Import template JSON</span>
+          </label>
+          <div class="row two">
+            <button id="btnDownloadTemplate" class="soft">Tải template JSON</button>
+            <button id="btnSaveLocal" class="soft">Lưu trên máy này</button>
+          </div>
+        </div>
+
+        <div class="section-card">
+          <h2>Layer ảnh & font cloud</h2>
+          <label class="filebox small">
+            <input id="bgUpload" type="file" accept="image/*" />
+            <span>Upload nền trong cùng</span>
+          </label>
+          <label class="filebox small">
+            <input id="fgUpload" type="file" accept="image/*" />
+            <span>Upload foreground / bảng tên PNG</span>
+          </label>
+          <label class="filebox small">
+            <input id="fontUpload" type="file" accept=".woff2,.woff,.ttf,.otf" multiple />
+            <span>Upload font riêng (.woff2, .woff, .ttf, .otf)</span>
+          </label>
+          <div id="fontFilesInfo" class="selected-files">Chưa chọn font nào.</div>
+          <div class="row three">
+            <button id="btnSaveCloudDraft" class="soft">Lưu cloud dạng Draft</button>
+            <button id="btnSaveCloudActive" class="primary ghost-gold">Lưu cloud thành Active</button>
+            <button id="btnArchiveCloud" class="soft danger">Archive template đã chọn</button>
+          </div>
+        </div>
+
+        <div class="section-card">
+          <h2>Vùng đặt người</h2>
+          <div class="grid4">
+            <label>X <input id="slotX" type="number" /></label>
+            <label>Y <input id="slotY" type="number" /></label>
+            <label>W <input id="slotW" type="number" /></label>
+            <label>H <input id="slotH" type="number" /></label>
+          </div>
+          <label class="check"><input id="showSlot" type="checkbox" checked /> Hiện khung vùng người</label>
+          <label class="check"><input id="showTextGuides" type="checkbox" checked /> Hiện khung chữ để kéo thả</label>
+          <p class="note">Admin có thể kéo thả trực tiếp chữ trên poster. Khi chữ gần tâm ngang, nó sẽ tự hút nhẹ vào giữa và hiện guide line báo hiệu.</p>
+          <p class="note">Khung vùng người cũng có thể kéo trực tiếp. Góc phải dưới của khung có nút resize.</p>
+        </div>
+
+        <div class="section-card">
+          <h2>Vị trí & style chữ</h2>
+          <div id="adminTextFields" class="admin-fields"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="stage-wrap">
+      <div class="stage-head">
+        <div>
+          <strong>Preview poster</strong>
+          <span id="canvasSize"></span>
+        </div>
+        <span id="canvasHint" class="hint">Leader: kéo ảnh người. Admin: kéo chữ, hoặc kéo / resize vùng người.</span>
+      </div>
+      <canvas id="posterCanvas"></canvas>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Layer render: Background → Person → Foreground → Dynamic Text</span>
+  </footer>
+
+  <script src="js/app.js" type="module"></script>
+</body>
+</html>
