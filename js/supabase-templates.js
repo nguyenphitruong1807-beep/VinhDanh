@@ -119,13 +119,15 @@ export async function saveTemplateToSupabase({
   const uploadedAssets = [];
 
   if (backgroundFile) {
-    const bg = await uploadPosterAsset(backgroundFile, `templates/${slug}`, "background");
+    const optimizedBackground = await optimizePosterAsset(backgroundFile, workingTemplate.canvas, "background");
+    const bg = await uploadPosterAsset(optimizedBackground, `templates/${slug}`, "background");
     workingTemplate.layers.background = bg.publicUrl;
     uploadedAssets.push(bg);
   }
 
   if (foregroundFile) {
-    const fg = await uploadPosterAsset(foregroundFile, `templates/${slug}`, "foreground");
+    const optimizedForeground = await optimizePosterAsset(foregroundFile, workingTemplate.canvas, "foreground");
+    const fg = await uploadPosterAsset(optimizedForeground, `templates/${slug}`, "foreground");
     workingTemplate.layers.foreground = fg.publicUrl;
     uploadedAssets.push(fg);
   }
@@ -195,6 +197,48 @@ export async function archiveTemplate(slug) {
   return data;
 }
 
+
+async function optimizePosterAsset(file, canvasConfig = {}, assetType = "background") {
+  if (!file?.type?.startsWith("image/")) return file;
+  const targetWidth = Number(canvasConfig.width || 1229);
+  const targetHeight = Number(canvasConfig.height || 1536);
+  const shouldKeepOriginal = assetType === "background"
+    ? (file.type === "image/webp" && file.size < 650_000)
+    : (file.type === "image/png" && file.size < 900_000);
+  if (shouldKeepOriginal) return file;
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const ctx = canvas.getContext("2d", { alpha: assetType !== "background" });
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+
+    const scale = Math.max(targetWidth / bitmap.width, targetHeight / bitmap.height);
+    const drawW = bitmap.width * scale;
+    const drawH = bitmap.height * scale;
+    const dx = (targetWidth - drawW) / 2;
+    const dy = (targetHeight - drawH) / 2;
+    if (assetType === "background") {
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, targetWidth, targetHeight);
+    }
+    ctx.drawImage(bitmap, dx, dy, drawW, drawH);
+    bitmap.close?.();
+
+    const mime = assetType === "background" ? "image/webp" : "image/png";
+    const quality = assetType === "background" ? 0.9 : 1;
+    const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error("Không tối ưu được ảnh")), mime, quality));
+    const baseName = String(file.name || assetType).replace(/\.[^.]+$/, "");
+    return new File([blob], `${baseName}.${assetType === "background" ? "webp" : "png"}`, { type: mime, lastModified: Date.now() });
+  } catch (err) {
+    console.warn("Giữ ảnh gốc vì không tối ưu được", err);
+    return file;
+  }
+}
+
 export async function uploadPosterAsset(file, folder, assetType = "other") {
   const safeFileName = sanitizeFileName(file.name || `${assetType}.bin`);
   const storagePath = `${folder}/${assetType}-${crypto.randomUUID()}-${safeFileName}`;
@@ -202,7 +246,7 @@ export async function uploadPosterAsset(file, folder, assetType = "other") {
   const { error: uploadError } = await supabase.storage
     .from(POSTER_BUCKET)
     .upload(storagePath, file, {
-      cacheControl: "3600",
+      cacheControl: "31536000",
       upsert: true,
       contentType: file.type || guessMimeType(file.name)
     });

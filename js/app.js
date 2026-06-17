@@ -10,6 +10,7 @@ import {
   loadFontsFromTemplate,
   createLinearGradientFill
 } from './supabase-templates.js';
+import { BACKEND_URL, BACKEND_TIMEOUT_MS, BACKEND_WARMUP_TIMEOUT_MS } from './backend-config.js';
 
 const DEFAULT_TEMPLATE = {
   templateId: "unite-award-poster-05-2026",
@@ -127,6 +128,42 @@ const DEFAULT_TEMPLATE = {
   ]
 };
 
+const PAGE_PRESETS = {
+  gold:   { slug:"gold",   label:"Vàng",   path:"gold/",   templateSlug:"unite-gold",   accent:"#e9bd55", tint:"#c89424", tintOpacity:0.00 },
+  red:    { slug:"red",    label:"Đỏ",     path:"red/",    templateSlug:"unite-red",    accent:"#e15b56", tint:"#b51f2b", tintOpacity:0.28 },
+  blue:   { slug:"blue",   label:"Xanh",   path:"blue/",   templateSlug:"unite-blue",   accent:"#5d9eff", tint:"#1555a6", tintOpacity:0.28 },
+  green:  { slug:"green",  label:"Lục",    path:"green/",  templateSlug:"unite-green",  accent:"#50c98b", tint:"#0c7b51", tintOpacity:0.24 },
+  purple: { slug:"purple", label:"Tím",    path:"purple/", templateSlug:"unite-purple", accent:"#a276ed", tint:"#6332a8", tintOpacity:0.27 }
+};
+
+// document.baseURI tự nhận đúng domain gốc lẫn project site dạng
+// https://username.github.io/repository/. Các trang màu có <base href="../">.
+const SITE_BASE_URL = new URL("./", document.baseURI);
+
+function detectPageSlug(){
+  const query = new URLSearchParams(location.search).get("page");
+  if(query && PAGE_PRESETS[query]) return query;
+  const segments = location.pathname.split("/").filter(Boolean);
+  const pageSegment = segments.find(segment => PAGE_PRESETS[segment]);
+  return pageSegment || "gold";
+}
+
+function getPageUrl(slug){
+  const page = PAGE_PRESETS[slug] || PAGE_PRESETS.gold;
+  return new URL(page.path, SITE_BASE_URL);
+}
+
+let currentPageSlug = detectPageSlug();
+let currentPage = PAGE_PRESETS[currentPageSlug];
+let backendReady = false;
+let backendWakePromise = null;
+let inlineEditingKey = null;
+let inlineOriginalValue = "";
+let tapCandidate = null;
+const processedImageCache = new Map();
+const drawableCache = new Map();
+const pendingBackgroundFiles = new Map();
+
 const SNAP_THRESHOLD = 14;
 const SLOT_HANDLE_SIZE = 20;
 const MAX_PERSON_EDGE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? 1800 : 2400;
@@ -162,7 +199,7 @@ let lastTapAt = 0;
 let hideToastTimer = null;
 const activePointers = new Map();
 let pinchState = null;
-let selectedTextKey = "awardTitle";
+let selectedTextKey = "name";
 let dragStart = { x:0, y:0, px:0, py:0, fieldX:0, fieldY:0, slotX:0, slotY:0, slotW:0, slotH:0 };
 let textRenderBoxes = new Map();
 let snapState = { active:false, targetX:0, label:"Đã canh giữa" };
@@ -187,13 +224,17 @@ let exportCleanMode = false;
 let textValues = {};
 
 async function init(){
+  setupPageUI();
   setupCanvas();
   bindEvents();
+  registerServiceWorker();
+  backendWakePromise = warmBackend();
   if(isIOS && $("iosSavePanel")) $("iosSavePanel").hidden = false;
   resetRemoveBgProgress();
-  await loadFonts();
+  loadFonts().catch(() => null);
 
-  const saved = localStorage.getItem("unite_poster_template");
+  const localKey = `unite_poster_template_${currentPageSlug}`;
+  const saved = localStorage.getItem(localKey);
   if(saved){
     try {
       template = JSON.parse(saved);
@@ -201,28 +242,60 @@ async function init(){
     } catch(e) {}
   }
 
+  // Hiển thị nền local ngay, không chờ mạng/Supabase.
+  applyPageDefaults(true);
+  showCanvasLoading(true, `Đang mở trang ${currentPage.label}...`);
+  await applyCurrentTemplate();
+  showCanvasLoading(false);
+  setPublicTemplateInfo(`Đang dùng template local của trang <b>${escapeHtml(currentPage.label)}</b>, đồng thời kiểm tra bản cloud mới nhất.`);
+
+  // Sau khi preview đã hiện mới đồng bộ cloud ở nền.
   try {
-    const cloudTemplate = await loadActiveTemplate();
+    const cloudTemplate = await withTimeoutPromise(loadActiveTemplate(currentPage.templateSlug), 10000, "Cloud phản hồi chậm");
     if (cloudTemplate) {
       template = structuredClone(cloudTemplate);
       normalizeTemplate(template);
-      setPublicTemplateInfo(`Đã nạp template active từ cloud: <b>${escapeHtml(template.templateName || template.templateId || 'Template')}</b>`);
+      applyPageDefaults(false);
+      await applyCurrentTemplate();
+      setPublicTemplateInfo(`Đã đồng bộ template <b>${escapeHtml(currentPage.label)}</b> từ cloud.`);
       setCloudStatus('Cloud: đã kết nối', 'good');
     } else {
-      setPublicTemplateInfo('Cloud chưa có template active. Tool đang dùng template local / mặc định.');
-      setCloudStatus('Cloud: chưa có active template', 'warn');
+      setPublicTemplateInfo(`Trang ${escapeHtml(currentPage.label)} chưa có template active. Admin có thể upload nền riêng và Lưu Active.`);
+      setCloudStatus('Cloud: chưa có template trang này', 'warn');
     }
   } catch (err) {
     console.warn('Không load được template cloud lúc khởi động:', err);
-    setPublicTemplateInfo('Không load được cloud lúc khởi động. Tool đang dùng template local / mặc định.');
-    setCloudStatus('Cloud: lỗi khi kiểm tra', 'bad');
+    setPublicTemplateInfo('Cloud đang chậm hoặc offline; preview local vẫn dùng bình thường.');
+    setCloudStatus('Cloud: dùng local', 'warn');
   }
 
-  await applyCurrentTemplate();
   syncLeaderGuideButton();
   syncModeSwitchButton();
   syncCompactToolbarLabels();
-  await refreshAuthStatus();
+  refreshAuthStatus().catch(() => null);
+}
+
+function withTimeoutPromise(promise, timeoutMs, message = "Quá thời gian chờ"){
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), timeoutMs))
+  ]);
+}
+
+function applyPageDefaults(useFallbackTint = false){
+  normalizeTemplate(template);
+  template.templateId = currentPage.templateSlug;
+  template.templateName ||= `Unite Poster - ${currentPage.label}`;
+  template.page ||= {};
+  template.page.slug = currentPage.slug;
+  template.page.label = currentPage.label;
+  template.page.path = currentPage.path;
+  template.page.accent = currentPage.accent;
+  if(template.page.tintEnabled === undefined) template.page.tintEnabled = useFallbackTint && currentPage.tintOpacity > 0;
+  if(!template.page.tintColor) template.page.tintColor = currentPage.tint;
+  if(template.page.tintOpacity === undefined) template.page.tintOpacity = useFallbackTint ? currentPage.tintOpacity : 0;
+  document.documentElement.style.setProperty('--page-accent', currentPage.accent);
+  syncPageAdminControls();
 }
 
 function normalizeTemplate(t){
@@ -250,14 +323,16 @@ async function applyCurrentTemplate(){
   syncTemplateMetaInputs();
   ensureTextValues();
   buildForms();
+  syncPageAdminControls();
   autoFitPerson();
   render();
 }
 
 function ensureTextValues(){
+  const savedDraft = loadPageDraft() || {};
   const next = {};
   template.textFields.forEach(field => {
-    next[field.key] = textValues[field.key] ?? field.defaultValue ?? "";
+    next[field.key] = textValues[field.key] ?? savedDraft[field.key] ?? field.defaultValue ?? "";
   });
   textValues = next;
 }
@@ -302,6 +377,9 @@ function bindEvents(){
     bgSourceFile = file;
     const dataUrl = await fileToDataURL(file);
     template.layers.background = dataUrl;
+    template.page ||= {};
+    template.page.tintEnabled = false;
+    if($("pageTintEnabled")) $("pageTintEnabled").checked = false;
     bgImg = await srcToImage(dataUrl);
     render();
   });
@@ -336,7 +414,7 @@ function bindEvents(){
   $("btnDownloadTemplate").addEventListener("click", () => downloadJSON(template, `${template.templateId || "template"}.json`));
   $("btnSaveLocal").addEventListener("click", () => {
     try {
-      localStorage.setItem("unite_poster_template", JSON.stringify(template));
+      localStorage.setItem(`unite_poster_template_${currentPageSlug}`, JSON.stringify(template));
       alert("Đã lưu template trên trình duyệt này.");
     } catch(e) {
       alert("Template có thể quá nặng do ảnh base64. Nên để ảnh trong thư mục assets hoặc lưu qua Supabase.");
@@ -347,7 +425,7 @@ function bindEvents(){
   $("btnMobileFit").addEventListener("click", () => { mobileQuickFit(); render(); });
   $("btnExport").addEventListener("click", handleTopPrimaryAction);
   $("btnSharePoster").addEventListener("click", handleTopSecondaryAction);
-  $("btnRemoveBg").addEventListener("click", removeBackgroundInBrowser);
+  $("btnRemoveBg").addEventListener("click", removeBackgroundSmart);
   $("btnResetTone").addEventListener("click", () => { resetToneControls(true); render(); });
 
   $("scaleRange").addEventListener("input", e => { person.scale = Number(e.target.value); render(); });
@@ -366,7 +444,8 @@ function bindEvents(){
   $("showTextGuides").addEventListener("change", e => { showTextGuides = e.target.checked; render(); });
   ["slotX","slotY","slotW","slotH"].forEach(id => $(id).addEventListener("input", updateSlotFromInputs));
 
-  $("templateIdInput").addEventListener("input", e => { template.templateId = e.target.value.trim(); });
+  $("templateIdInput").readOnly = true;
+  $("templateIdInput").title = "Slug được khóa theo trang đang chọn";
   $("templateNameInput").addEventListener("input", e => { template.templateName = e.target.value.trim(); });
 
   $("btnAdminLogin").addEventListener("click", onAdminLogin);
@@ -378,6 +457,33 @@ function bindEvents(){
   $("btnLoadSelectedCloud").addEventListener("click", loadSelectedCloudTemplate);
   $("btnArchiveCloud").addEventListener("click", onArchiveSelectedCloud);
   $("btnReloadActiveCloud").addEventListener("click", reloadActiveCloudTemplate);
+
+  if($("pageSwitcher")) $("pageSwitcher").addEventListener("change", e => navigateToPage(e.target.value));
+  if($("copyPageLink")) $("copyPageLink").addEventListener("click", async e => {
+    e.preventDefault();
+    await navigator.clipboard?.writeText(getCurrentPageUrl());
+    showMobileToast("Đã copy link trang " + currentPage.label);
+  });
+  if($("btnOpenCurrentPage")) $("btnOpenCurrentPage").addEventListener("click", () => window.open(getCurrentPageUrl(), "_blank"));
+  if($("btnBatchSaveBackgrounds")) $("btnBatchSaveBackgrounds").addEventListener("click", saveBatchBackgrounds);
+  if($("pageTintEnabled")) $("pageTintEnabled").addEventListener("change", e => { template.page.tintEnabled = e.target.checked; render(); });
+  if($("pageTintColor")) $("pageTintColor").addEventListener("input", e => { template.page.tintColor = e.target.value; render(); });
+  if($("pageTintOpacity")) $("pageTintOpacity").addEventListener("input", e => { template.page.tintOpacity = Number(e.target.value); render(); });
+
+  if($("btnQuickUpload")) $("btnQuickUpload").addEventListener("click", () => $("personUpload").click());
+  if($("btnQuickRemoveBg")) $("btnQuickRemoveBg").addEventListener("click", removeBackgroundSmart);
+  if($("btnQuickFit")) $("btnQuickFit").addEventListener("click", () => { autoFitPerson(); render(); showMobileToast("Đã tự căn avatar"); });
+  if($("btnQuickText")) $("btnQuickText").addEventListener("click", () => openInlineTextEditor(selectedTextKey || "name"));
+
+  if($("inlineTextInput")) $("inlineTextInput").addEventListener("input", onInlineTextInput);
+  if($("inlineTextInput")) $("inlineTextInput").addEventListener("keydown", e => {
+    if(e.key === "Enter"){ e.preventDefault(); closeInlineTextEditor(true); }
+    if(e.key === "Escape"){ e.preventDefault(); closeInlineTextEditor(false); }
+  });
+  if($("inlineTextApply")) $("inlineTextApply").addEventListener("click", () => closeInlineTextEditor(true));
+  if($("inlineTextClose")) $("inlineTextClose").addEventListener("click", () => closeInlineTextEditor(false));
+  if($("inlineTextSmaller")) $("inlineTextSmaller").addEventListener("click", () => nudgeInlineFont(-2));
+  if($("inlineTextLarger")) $("inlineTextLarger").addEventListener("click", () => nudgeInlineFont(2));
   if($("btnHideIosTip")) $("btnHideIosTip").addEventListener("click", () => { const panel = $("iosSavePanel"); if(panel) panel.hidden = true; });
   if($("btnToggleGuides")) $("btnToggleGuides").addEventListener("click", () => {
     leaderGuidesVisible = !leaderGuidesVisible;
@@ -398,12 +504,301 @@ function bindEvents(){
     });
   }
 
+  canvas.addEventListener("dblclick", e => {
+    const p = canvasPoint(e);
+    const hit = hitTextBox(p.x, p.y);
+    if(hit) openInlineTextEditor(hit.key);
+  });
   canvas.addEventListener("pointerdown", pointerDown);
   canvas.addEventListener("pointermove", pointerMove);
   canvas.addEventListener("pointerleave", pointerLeave);
   canvas.addEventListener("pointercancel", pointerUp);
   window.addEventListener("pointerup", pointerUp);
   window.addEventListener("resize", () => { syncCompactToolbarLabels(); showMobileToast("Kéo 1 ngón • Chụm 2 ngón để zoom"); });
+}
+
+
+function setupPageUI(){
+  document.documentElement.style.setProperty('--page-accent', currentPage.accent);
+  document.title = `Unite Poster ${currentPage.label} · Studio Pro V7`;
+  const select = $("pageSwitcher");
+  if(select){
+    select.innerHTML = Object.values(PAGE_PRESETS).map(page => `<option value="${page.slug}" ${page.slug === currentPageSlug ? "selected" : ""}>${page.label}</option>`).join("");
+  }
+  const pageStatus = $("pageStatus");
+  if(pageStatus){
+    pageStatus.textContent = `Trang: ${currentPage.label}`;
+    pageStatus.style.borderColor = currentPage.accent;
+  }
+  const grid = $("channelAdminGrid");
+  if(grid){
+    grid.innerHTML = "";
+    Object.values(PAGE_PRESETS).forEach(page => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `channel-card ${page.slug === currentPageSlug ? "active" : ""}`;
+      btn.style.setProperty("--channel-color", page.accent);
+      btn.textContent = page.label;
+      btn.addEventListener("click", () => navigateToPage(page.slug));
+      grid.appendChild(btn);
+    });
+  }
+  const batchGrid = $("batchBackgroundGrid");
+  if(batchGrid){
+    batchGrid.innerHTML = "";
+    Object.values(PAGE_PRESETS).forEach(page => {
+      const item = document.createElement("div");
+      item.className = "batch-bg-item";
+      item.style.setProperty("--channel-color", page.accent);
+      item.innerHTML = `<label><span class="batch-bg-preview"></span><span>${page.label}</span><input type="file" accept="image/*" data-page="${page.slug}"></label>`;
+      const input = item.querySelector("input");
+      const preview = item.querySelector(".batch-bg-preview");
+      input.addEventListener("change", () => {
+        const file = input.files?.[0];
+        if(!file) return;
+        pendingBackgroundFiles.set(page.slug, file);
+        item.classList.add("has-file");
+        preview.style.backgroundImage = `url(${URL.createObjectURL(file)})`;
+        updateBatchBackgroundStatus();
+      });
+      batchGrid.appendChild(item);
+    });
+  }
+  if($("adminCurrentChannelName")) $("adminCurrentChannelName").textContent = `Trang ${currentPage.label}`;
+  if($("adminCurrentChannelLink")) $("adminCurrentChannelLink").textContent = currentPage.path;
+}
+
+function navigateToPage(slug){
+  if(!PAGE_PRESETS[slug] || slug === currentPageSlug) return;
+  if(location.protocol === "file:"){
+    const url = new URL(location.href);
+    url.searchParams.set("page", slug);
+    location.href = url.toString();
+    return;
+  }
+  location.href = getPageUrl(slug).toString();
+}
+
+function getCurrentPageUrl(){
+  if(location.protocol === "file:"){
+    const url = new URL(location.href);
+    url.searchParams.set("page", currentPageSlug);
+    return url.toString();
+  }
+  return getPageUrl(currentPageSlug).toString();
+}
+
+function syncPageAdminControls(){
+  if(!template.page) return;
+  if($("pageTintEnabled")) $("pageTintEnabled").checked = Boolean(template.page.tintEnabled);
+  if($("pageTintColor")) $("pageTintColor").value = template.page.tintColor || currentPage.tint;
+  if($("pageTintOpacity")) $("pageTintOpacity").value = Number(template.page.tintOpacity ?? currentPage.tintOpacity);
+  if($("templateIdInput")) $("templateIdInput").value = currentPage.templateSlug;
+}
+
+function showCanvasLoading(visible, text = "Đang tải..."){
+  const el = $("canvasLoading");
+  if(!el) return;
+  el.hidden = !visible;
+  if($("canvasLoadingText")) $("canvasLoadingText").textContent = text;
+}
+
+async function warmBackend(){
+  if(backendWakePromise) return backendWakePromise;
+  backendWakePromise = (async () => {
+    setBackendStatus("AI: đang khởi động...", "warn");
+    try{
+      let response;
+      try{
+        response = await fetchWithTimeout(`${BACKEND_URL}/api/warmup`, { cache:"no-store" }, BACKEND_WARMUP_TIMEOUT_MS);
+      }catch(_){
+        response = await fetchWithTimeout(`${BACKEND_URL}/health`, { cache:"no-store" }, BACKEND_WARMUP_TIMEOUT_MS);
+      }
+      if(!response.ok) throw new Error(`HTTP ${response.status}`);
+      backendReady = true;
+      setBackendStatus("AI: sẵn sàng", "good");
+      return true;
+    }catch(err){
+      backendReady = false;
+      setBackendStatus("AI: dùng dự phòng", "warn");
+      console.warn("Backend warmup failed", err);
+      return false;
+    }
+  })();
+  return backendWakePromise;
+}
+
+function setBackendStatus(text, state="warn"){
+  const el = $("backendStatus");
+  if(!el) return;
+  el.textContent = text;
+  el.className = `pill compact-pill ${state}`;
+}
+
+async function fetchWithTimeout(url, options = {}, timeout = BACKEND_TIMEOUT_MS){
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try{
+    return await fetch(url, { ...options, signal:controller.signal });
+  }finally{
+    clearTimeout(timer);
+  }
+}
+
+function registerServiceWorker(){
+  if("serviceWorker" in navigator && location.protocol.startsWith("http")){
+    const workerUrl = new URL("sw.js", SITE_BASE_URL);
+    navigator.serviceWorker.register(workerUrl.href, { scope: SITE_BASE_URL.pathname })
+      .catch(err => console.warn("Service worker chưa đăng ký được", err));
+  }
+}
+
+function openInlineTextEditor(key){
+  const field = template.textFields.find(item => item.key === key);
+  const box = textRenderBoxes.get(key);
+  const editor = $("inlineTextEditor");
+  const input = $("inlineTextInput");
+  if(!field || !box || !editor || !input) return;
+  inlineEditingKey = key;
+  selectedTextKey = key;
+  inlineOriginalValue = textValues[key] ?? field.defaultValue ?? "";
+  input.value = inlineOriginalValue;
+  if($("inlineTextLabel")) $("inlineTextLabel").textContent = field.label || "Sửa nội dung";
+  editor.hidden = false;
+  positionInlineTextEditor(box);
+  render();
+  requestAnimationFrame(() => {
+    input.focus({ preventScroll:false });
+    input.select();
+  });
+}
+
+function positionInlineTextEditor(box){
+  const editor = $("inlineTextEditor");
+  if(!editor || window.innerWidth <= 900) return;
+  const canvasRect = canvas.getBoundingClientRect();
+  const shellRect = $("canvasShell").getBoundingClientRect();
+  const sx = canvasRect.width / canvas.width;
+  const sy = canvasRect.height / canvas.height;
+  const width = clamp(box.width * sx, 240, Math.max(240, shellRect.width - 18));
+  let left = canvasRect.left - shellRect.left + box.x * sx;
+  left = clamp(left, 8, Math.max(8, shellRect.width - width - 8));
+  let top = canvasRect.top - shellRect.top + box.y * sy - 118;
+  if(top < 8) top = canvasRect.top - shellRect.top + (box.y + box.height) * sy + 8;
+  editor.style.left = `${left}px`;
+  editor.style.top = `${top}px`;
+  editor.style.width = `${width}px`;
+}
+
+function onInlineTextInput(e){
+  if(!inlineEditingKey) return;
+  textValues[inlineEditingKey] = e.target.value;
+  const field = template.textFields.find(item => item.key === inlineEditingKey);
+  if(activeTab === "admin" && field) field.defaultValue = e.target.value;
+  syncLeaderTextInput(inlineEditingKey, e.target.value);
+  savePageDraft();
+  render();
+}
+
+function closeInlineTextEditor(apply = true){
+  if(!inlineEditingKey) return;
+  const key = inlineEditingKey;
+  if(!apply){
+    textValues[key] = inlineOriginalValue;
+    const field = template.textFields.find(item => item.key === key);
+    if(activeTab === "admin" && field) field.defaultValue = inlineOriginalValue;
+    syncLeaderTextInput(key, inlineOriginalValue);
+  }
+  inlineEditingKey = null;
+  const editor = $("inlineTextEditor");
+  if(editor) editor.hidden = true;
+  savePageDraft();
+  render();
+}
+
+function nudgeInlineFont(delta){
+  if(!inlineEditingKey) return;
+  const field = template.textFields.find(item => item.key === inlineEditingKey);
+  if(!field) return;
+  field.fontSize = clamp(Number(field.fontSize || 36) + delta, 12, 180);
+  updateAdminCardValues(field);
+  render();
+}
+
+function syncLeaderTextInput(key, value){
+  const input = document.querySelector(`#textForm input[data-key="${CSS.escape(key)}"]`);
+  if(input && input.value !== value) input.value = value;
+}
+
+function savePageDraft(){
+  try{
+    localStorage.setItem(`unite_poster_values_${currentPageSlug}`, JSON.stringify(textValues));
+  }catch(_){ }
+}
+
+function loadPageDraft(){
+  try{
+    const raw = localStorage.getItem(`unite_poster_values_${currentPageSlug}`);
+    return raw ? JSON.parse(raw) : null;
+  }catch(_){ return null; }
+}
+
+function updateBatchBackgroundStatus(){
+  const el = $("batchBackgroundStatus");
+  if(!el) return;
+  const count = pendingBackgroundFiles.size;
+  el.textContent = count ? `Đã chọn ${count}/5 nền. Bấm Lưu để cập nhật cùng lúc.` : "Có thể chọn một hoặc đủ 5 nền rồi lưu một lần.";
+}
+
+async function saveBatchBackgrounds(){
+  if(!pendingBackgroundFiles.size){
+    alert("Chọn ít nhất 1 ảnh nền trước nha.");
+    return;
+  }
+  const btn = $("btnBatchSaveBackgrounds");
+  const old = btn.textContent;
+  btn.disabled = true;
+  try{
+    let done = 0;
+    const total = pendingBackgroundFiles.size;
+    for(const [pageSlug, file] of pendingBackgroundFiles.entries()){
+      const page = PAGE_PRESETS[pageSlug];
+      btn.textContent = `Đang lưu ${++done}/${total}: ${page.label}`;
+      let pageTemplate = null;
+      try{ pageTemplate = await loadActiveTemplate(page.templateSlug); }catch(_){ }
+      if(!pageTemplate) pageTemplate = structuredClone(DEFAULT_TEMPLATE);
+      normalizeTemplate(pageTemplate);
+      pageTemplate.templateId = page.templateSlug;
+      pageTemplate.templateName = `Unite Poster - ${page.label}`;
+      pageTemplate.page = {
+        ...(pageTemplate.page || {}),
+        slug:page.slug,
+        label:page.label,
+        path:page.path,
+        accent:page.accent,
+        tintEnabled:false,
+        tintColor:page.tint,
+        tintOpacity:0
+      };
+      await saveTemplateToSupabase({
+        template:pageTemplate,
+        status:"active",
+        backgroundFile:file,
+        foregroundFile:null,
+        fontFiles:[]
+      });
+    }
+    pendingBackgroundFiles.clear();
+    updateBatchBackgroundStatus();
+    alert("Đã cập nhật các nền đã chọn thành Active cho từng link.");
+    await reloadActiveCloudTemplate();
+  }catch(err){
+    console.error(err);
+    alert(`Lưu nhiều nền lỗi: ${err.message || "Không xác định"}`);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = old;
+  }
 }
 
 async function handleTopPrimaryAction(){
@@ -494,9 +889,14 @@ async function onSaveCloud(status){
     });
     template = structuredClone(saved.template_json);
     normalizeTemplate(template);
+    applyPageDefaults(false);
     await applyCurrentTemplate();
     await refreshCloudTemplates();
     selectedCloudSlug = saved.slug;
+    bgSourceFile = null;
+    fgSourceFile = null;
+    selectedFontFiles = [];
+    if($("fontFilesInfo")) $("fontFilesInfo").textContent = "Chưa chọn font nào.";
     setPublicTemplateInfo(`Cloud lưu thành công: <b>${escapeHtml(saved.name)}</b> (${escapeHtml(saved.status)})`);
     alert(`Đã lưu template cloud thành công với status = ${saved.status}.`);
     saveBtn.textContent = oldText;
@@ -513,7 +913,9 @@ async function refreshCloudTemplates(requireAdmin = true){
   const listEl = $("cloudTemplatesList");
   listEl.innerHTML = '<div class="cloud-box mini-box">Đang tải danh sách template...</div>';
   try {
-    cloudTemplates = requireAdmin ? await listAdminTemplates() : [];
+    const allTemplates = requireAdmin ? await listAdminTemplates() : [];
+    cloudTemplates = allTemplates.filter(item => item.slug === currentPage.templateSlug);
+    selectedCloudSlug = cloudTemplates[0]?.slug || null;
     renderCloudTemplateList();
   } catch (err) {
     cloudTemplates = [];
@@ -524,7 +926,7 @@ async function refreshCloudTemplates(requireAdmin = true){
 function renderCloudTemplateList(){
   const listEl = $("cloudTemplatesList");
   if(!cloudTemplates.length){
-    listEl.innerHTML = '<div class="cloud-box mini-box">Chưa có danh sách template hoặc chưa đăng nhập admin.</div>';
+    listEl.innerHTML = `<div class="cloud-box mini-box">Trang ${escapeHtml(currentPage.label)} chưa có template cloud hoặc admin chưa đăng nhập.</div>`;
     return;
   }
   listEl.innerHTML = '';
@@ -570,13 +972,14 @@ async function loadSelectedCloudTemplate(){
 
 async function reloadActiveCloudTemplate(){
   try {
-    const cloudTemplate = await loadActiveTemplate();
+    const cloudTemplate = await loadActiveTemplate(currentPage.templateSlug);
     if (!cloudTemplate) {
       alert('Cloud chưa có template active.');
       return;
     }
     template = structuredClone(cloudTemplate);
     normalizeTemplate(template);
+    applyPageDefaults(false);
     await applyCurrentTemplate();
     setPublicTemplateInfo(`Đã load active cloud: <b>${escapeHtml(template.templateName || template.templateId)}</b>`);
   } catch (err) {
@@ -693,13 +1096,18 @@ function switchTab(tabName){
 }
 
 function syncTemplateMetaInputs(){
-  $("templateIdInput").value = template.templateId || '';
-  $("templateNameInput").value = template.templateName || '';
+  $("templateIdInput").value = currentPage.templateSlug;
+  $("templateNameInput").value = template.templateName || `Unite Poster - ${currentPage.label}`;
 }
 
 function syncTemplateMetaFromInputs(){
-  template.templateId = $("templateIdInput").value.trim() || template.templateId || 'unite-template';
-  template.templateName = $("templateNameInput").value.trim() || template.templateName || template.templateId;
+  template.templateId = currentPage.templateSlug;
+  template.templateName = $("templateNameInput").value.trim() || template.templateName || `Unite Poster - ${currentPage.label}`;
+  template.page ||= {};
+  template.page.slug = currentPage.slug;
+  template.page.label = currentPage.label;
+  template.page.path = currentPage.path;
+  template.page.accent = currentPage.accent;
 }
 
 function resetDragAndSnap(){
@@ -715,8 +1123,12 @@ function resetDragAndSnap(){
 }
 
 async function loadTemplateImages(){
-  bgImg = template.layers.background ? await srcToImage(template.layers.background) : null;
-  fgImg = template.layers.foreground ? await srcToImage(template.layers.foreground) : null;
+  const [background, foreground] = await Promise.all([
+    template.layers.background ? loadCachedDrawable(template.layers.background) : Promise.resolve(null),
+    template.layers.foreground ? loadCachedDrawable(template.layers.foreground) : Promise.resolve(null)
+  ]);
+  bgImg = background;
+  fgImg = foreground;
 }
 
 function buildForms(){
@@ -728,8 +1140,9 @@ function buildForms(){
     label.textContent = field.label || field.key;
     const input = document.createElement("input");
     input.type = "text";
+    input.dataset.key = field.key;
     input.value = textValues[field.key];
-    input.addEventListener("input", () => { textValues[field.key] = input.value; render(); });
+    input.addEventListener("input", () => { textValues[field.key] = input.value; if(activeTab === "admin") field.defaultValue = input.value; savePageDraft(); render(); });
     label.appendChild(input);
     form.appendChild(label);
   });
@@ -891,6 +1304,7 @@ function render(){
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if(bgImg) drawCover(bgImg, 0, 0, canvas.width, canvas.height);
   else fillPlaceholder("Chưa có background");
+  drawPageTint();
 
   if(personImg){
     const drawable = getProcessedPersonDrawable();
@@ -907,6 +1321,7 @@ function render(){
 
   if(fgImg) drawCover(fgImg, 0, 0, canvas.width, canvas.height);
   drawDynamicText();
+  if(inlineEditingKey && !exportCleanMode) drawInlineTextGuide();
   if(activeTab === "admin" && showTextGuides) drawTextGuides();
   if(activeTab === "admin" && showSlot) drawPersonSlotGuide();
   if(personImg && activeTab === "leader" && leaderGuidesVisible && !exportCleanMode) drawPersonTransformGuide();
@@ -915,6 +1330,31 @@ function render(){
 
 function drawCover(img, x, y, w, h){
   ctx.drawImage(img, x, y, w, h);
+}
+
+function drawPageTint(){
+  const page = template.page || {};
+  const opacity = Number(page.tintOpacity || 0);
+  if(!page.tintEnabled || opacity <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = clamp(opacity, 0, 0.75);
+  ctx.globalCompositeOperation = "color";
+  ctx.fillStyle = page.tintColor || currentPage.tint;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
+}
+
+function drawInlineTextGuide(){
+  const box = textRenderBoxes.get(inlineEditingKey);
+  if(!box) return;
+  ctx.save();
+  ctx.setLineDash([10, 7]);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = currentPage.accent;
+  ctx.fillStyle = "rgba(0,0,0,.16)";
+  ctx.fillRect(box.x, box.y, box.width, box.height);
+  ctx.strokeRect(box.x, box.y, box.width, box.height);
+  ctx.restore();
 }
 
 function fillPlaceholder(text){
@@ -1359,6 +1799,101 @@ function mobileQuickFit(){
   showMobileToast("Đã canh nhanh cho màn điện thoại");
 }
 
+async function removeBackgroundSmart(){
+  if(!personSourceFile){ alert("Upload ảnh nhân sự trước nha."); return; }
+  const cacheKey = `${personSourceFile.name}:${personSourceFile.size}:${personSourceFile.lastModified}`;
+  const cached = processedImageCache.get(cacheKey);
+  if(cached){
+    personImg = cached.image;
+    person.bounds = cached.bounds;
+    person.x = cached.transform.x;
+    person.y = cached.transform.y;
+    person.scale = cached.transform.scale;
+    syncPersonControls();
+    invalidatePersonCache();
+    render();
+    showMobileToast("Đã dùng kết quả tách nền đã lưu tạm");
+    return;
+  }
+
+  const btn = $("btnRemoveBg");
+  const quickBtn = $("btnQuickRemoveBg");
+  const old = btn?.textContent || "Xóa nền AI";
+  if(btn){ btn.textContent = "Đang tách nền..."; btn.disabled = true; }
+  if(quickBtn) quickBtn.disabled = true;
+  updateRemoveBgProgress({ visible:true, percent:5, title:"Chuẩn bị ảnh", hint:"Đang nén ảnh trước khi gửi AI để giảm thời gian upload và xử lý.", step:"prepare", mode:"ai" });
+
+  try{
+    const ready = await Promise.race([
+      backendWakePromise || warmBackend(),
+      new Promise(resolve => setTimeout(() => resolve(false), 12000))
+    ]);
+    if(ready) setBackendStatus("AI: đang xử lý", "warn");
+    const result = await removeBackgroundViaBackend(personSourceFile);
+    processedImageCache.set(cacheKey, result);
+    personImg = result.image;
+    person.bounds = result.bounds;
+    person.x = result.transform.x;
+    person.y = result.transform.y;
+    person.scale = result.transform.scale;
+    syncPersonControls();
+    invalidatePersonCache();
+    updateRemoveBgProgress({ visible:true, percent:100, title:"AI hoàn tất", hint:"Đã tách nền và tự căn avatar trong một lần xử lý.", step:"done", mode:"ai" });
+    setRemoveBgStatus("Đã tách nền bằng backend và tự căn avatar.");
+    setBackendStatus("AI: sẵn sàng", "good");
+    showMobileToast("Tách nền xong • Đã tự căn avatar");
+    render();
+  }catch(err){
+    console.warn("Backend remove background failed, falling back to browser", err);
+    setBackendStatus("AI: fallback trên máy", "warn");
+    setRemoveBgStatus(`Backend chưa xử lý được (${err.message || "lỗi"}). Đang chuyển sang AI/fallback trên máy...`);
+    await removeBackgroundInBrowser();
+  }finally{
+    if(btn){ btn.textContent = old; btn.disabled = false; }
+    if(quickBtn) quickBtn.disabled = false;
+  }
+}
+
+async function removeBackgroundViaBackend(file){
+  updateRemoveBgProgress({ visible:true, percent:16, title:"Gửi ảnh đến AI", hint:"Ảnh đã được tối ưu kích thước trước khi gửi.", step:"download", mode:"ai" });
+  const optimizedFile = await compressFileForRemoval(file);
+  const form = new FormData();
+  form.append("file", optimizedFile, optimizedFile.name || "person.jpg");
+  form.append("slot_x", String(template.personSlot.x));
+  form.append("slot_y", String(template.personSlot.y));
+  form.append("slot_width", String(template.personSlot.width));
+  form.append("slot_height", String(template.personSlot.height));
+  form.append("anchor_y", "bottom");
+  form.append("fit_mode", "head_to_belly");
+  form.append("save_removed_bg", "false");
+  form.append("return_base64", "true");
+  form.append("folder", `processed/autofit/${currentPageSlug}`);
+
+  updateRemoveBgProgress({ visible:true, percent:35, title:"AI đang nhận diện người", hint:"Backend đang tách nền và tính vị trí đầu–thân phù hợp với poster.", step:"segment", mode:"ai" });
+  const response = await fetchWithTimeout(`${BACKEND_URL}/api/auto-fit-person`, { method:"POST", body:form }, BACKEND_TIMEOUT_MS);
+  const data = await response.json().catch(() => ({}));
+  if(!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+
+  let source = null;
+  if(data.base64) source = `data:image/png;base64,${data.base64}`;
+  if(!source) source = data.storage?.public_url || data.storage?.publicUrl;
+  if(!source) throw new Error("Backend chưa trả ảnh PNG đã tách nền");
+
+  updateRemoveBgProgress({ visible:true, percent:84, title:"Đang đưa ảnh vào poster", hint:"Đang tải ảnh trong suốt và áp dụng vị trí tự căn.", step:"segment", mode:"ai" });
+  const image = await loadCachedDrawable(source, { bypassCache:source.startsWith("data:") });
+  const bounds = getAlphaBounds(image);
+  const transform = data.transform || {};
+  return {
+    image,
+    bounds,
+    transform:{
+      x:Number.isFinite(Number(transform.x)) ? Number(transform.x) : template.personSlot.x,
+      y:Number.isFinite(Number(transform.y)) ? Number(transform.y) : template.personSlot.y,
+      scale:Number.isFinite(Number(transform.scale)) ? Number(transform.scale) : 1
+    }
+  };
+}
+
 async function removeBackgroundInBrowser(){
   if(!personSourceFile){ alert("Upload ảnh nhân sự trước nha."); return; }
   const btn = $("btnRemoveBg");
@@ -1552,25 +2087,30 @@ function pointerDown(e){
   activePointers.set(e.pointerId, p);
 
   if(activePointers.size === 2 && personImg && activeTab === "leader"){
+    tapCandidate = null;
     startPinchGesture();
     showMobileToast("Đang zoom avatar bằng 2 ngón");
     return;
   }
 
-  if(activeTab === "admin"){
-    const hit = hitTextBox(p.x, p.y);
-    if(hit){
-      selectedTextKey = hit.key;
-      const field = template.textFields.find(f => f.key === hit.key);
+  const textHit = hitTextBox(p.x, p.y);
+  if(inlineEditingKey && (!textHit || textHit.key !== inlineEditingKey)) closeInlineTextEditor(true);
+  if(textHit){
+    selectedTextKey = textHit.key;
+    tapCandidate = { pointerId:e.pointerId, key:textHit.key, x:p.x, y:p.y, startedAt:performance.now(), moved:false };
+    if(activeTab === "admin"){
+      const field = template.textFields.find(f => f.key === textHit.key);
       if(field?.draggable !== false){
         draggingText = true;
         dragStart = { x:p.x, y:p.y, fieldX:field.x, fieldY:field.y };
       }
       syncAdminTextCards();
-      render();
-      return;
     }
+    render();
+    return;
+  }
 
+  if(activeTab === "admin"){
     const slotHit = hitPersonSlot(p.x, p.y);
     if(slotHit === "resize"){
       resizingSlot = true;
@@ -1595,6 +2135,10 @@ function pointerDown(e){
 function pointerMove(e){
   const p = canvasPoint(e);
   if(activePointers.has(e.pointerId)) activePointers.set(e.pointerId, p);
+
+  if(tapCandidate && tapCandidate.pointerId === e.pointerId){
+    if(Math.hypot(p.x - tapCandidate.x, p.y - tapCandidate.y) > 9) tapCandidate.moved = true;
+  }
 
   if(pinchState && activePointers.size >= 2){
     updatePinchGesture();
@@ -1643,6 +2187,7 @@ function pointerMove(e){
 }
 
 function pointerUp(e){
+  const candidate = tapCandidate && e?.pointerId === tapCandidate.pointerId ? tapCandidate : null;
   if(e?.pointerId !== undefined){
     activePointers.delete(e.pointerId);
     try { canvas.releasePointerCapture(e.pointerId); } catch(err) {}
@@ -1660,6 +2205,10 @@ function pointerUp(e){
     if(snapState.active) snapState.active = false;
     if(wasDragging) render();
   }
+  if(candidate && !candidate.moved && performance.now() - candidate.startedAt < 750){
+    requestAnimationFrame(() => openInlineTextEditor(candidate.key));
+  }
+  if(candidate) tapCandidate = null;
 }
 
 function pointerLeave(e){
@@ -1755,8 +2304,10 @@ function updateAdminCardValues(field){
   if(!card) return;
   const x = card.querySelector('input[data-field="x"]');
   const y = card.querySelector('input[data-field="y"]');
+  const size = card.querySelector('input[data-field="fontSize"]');
   if(x) x.value = field.x;
   if(y) y.value = field.y;
+  if(size) size.value = field.fontSize;
 }
 
 function canvasPoint(e){
@@ -1871,9 +2422,50 @@ async function fileToImage(file){
   return srcToImage(url);
 }
 
+async function loadCachedDrawable(src, { bypassCache = false } = {}){
+  if(!src) return null;
+  if(src.startsWith("data:") || src.startsWith("blob:")) return srcToImage(src);
+  const absolute = new URL(src, location.href).href;
+  if(drawableCache.has(absolute)) return drawableCache.get(absolute);
+  const promise = (async () => {
+    try{
+      let response = null;
+      if(!bypassCache && "caches" in window){
+        const cache = await caches.open("unite-poster-assets-v7");
+        response = await cache.match(absolute);
+        if(!response){
+          response = await fetch(absolute, { mode:"cors", cache:"force-cache" });
+          if(response.ok) await cache.put(absolute, response.clone());
+        }
+      }else{
+        response = await fetch(absolute, { mode:"cors", cache:"force-cache" });
+      }
+      if(!response?.ok) throw new Error(`Không tải được asset ${response?.status || ""}`);
+      const blob = await response.blob();
+      if("createImageBitmap" in window){
+        return await createImageBitmap(blob, { premultiplyAlpha:"premultiply", colorSpaceConversion:"default" });
+      }
+      return await srcToImage(URL.createObjectURL(blob));
+    }catch(err){
+      console.warn("Cache image fallback", absolute, err);
+      return await srcToImage(absolute);
+    }
+  })();
+  drawableCache.set(absolute, promise);
+  try{
+    const drawable = await promise;
+    drawableCache.set(absolute, drawable);
+    return drawable;
+  }catch(err){
+    drawableCache.delete(absolute);
+    throw err;
+  }
+}
+
 function srcToImage(src){
   return new Promise((resolve, reject) => {
     const img = new Image();
+    img.decoding = "async";
     img.onload = () => resolve(img);
     img.onerror = reject;
     img.crossOrigin = "anonymous";

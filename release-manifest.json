@@ -1,0 +1,33 @@
+{
+  "version": "7.0.0",
+  "backend": "https://unite-poster-backend.onrender.com",
+  "pages": [
+    {
+      "slug": "gold",
+      "path": "gold/",
+      "template": "unite-gold"
+    },
+    {
+      "slug": "red",
+      "path": "red/",
+      "template": "unite-red"
+    },
+    {
+      "slug": "blue",
+      "path": "blue/",
+      "template": "unite-blue"
+    },
+    {
+      "slug": "green",
+      "path": "green/",
+      "template": "unite-green"
+    },
+    {
+      "slug": "purple",
+      "path": "purple/",
+      "template": "unite-purple"
+    }
+  ],
+  "hosting": "github-pages",
+  "basePathMode": "automatic-document-base-uri"
+}
