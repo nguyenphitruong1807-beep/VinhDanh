@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KITAI - Unite Poster Studio</title>
+  <script>
+    const pageId = "kitai";
+    const target = new URL("index.html", location.href);
+    const params = new URLSearchParams(location.search);
+    params.set("bg", pageId);
+    params.set("page", pageId);
+    if (!params.get("template")) params.set("template", "unite-award-poster-05-2026");
+    target.search = params.toString();
+    location.replace(target.href);
+  </script>
+</head>
+<body>
+  <a href="index.html?bg=kitai&page=kitai&template=unite-award-poster-05-2026">Mo trang KITAI</a>
+</body>
+</html>

@@ -10,7 +10,6 @@ import {
   loadFontsFromTemplate,
   createLinearGradientFill
 } from './supabase-templates.js';
-import { BACKEND_URL, BACKEND_TIMEOUT_MS, BACKEND_WARMUP_TIMEOUT_MS } from './backend-config.js';
 
 const DEFAULT_TEMPLATE = {
   templateId: "unite-award-poster-05-2026",
@@ -20,6 +19,20 @@ const DEFAULT_TEMPLATE = {
     background: "assets/unite-bg-clean.png",
     foreground: "assets/unite-foreground.png"
   },
+  backgroundVariants: [
+    { id: "tinhhoa", label: "TINHHOA", src: "assets/unite-bg-clean.png", isDefault: true },
+    { id: "kitai", label: "KITAI", src: "assets/unite-bg.png" },
+    { id: "tienphong", label: "TIENPHONG", src: "assets/unite-bg-clean.png" },
+    { id: "khaipha", label: "KHAIPHA", src: "assets/unite-bg-clean.png" },
+    { id: "bucpha", label: "BUCPHA", src: "assets/unite-bg-clean.png" }
+  ],
+  foregroundVariants: [
+    { id: "tinhhoa", label: "TINHHOA", src: "assets/unite-foreground.png", isDefault: true },
+    { id: "kitai", label: "KITAI", src: "assets/unite-foreground.png" },
+    { id: "tienphong", label: "TIENPHONG", src: "assets/unite-foreground.png" },
+    { id: "khaipha", label: "KHAIPHA", src: "assets/unite-foreground.png" },
+    { id: "bucpha", label: "BUCPHA", src: "assets/unite-foreground.png" }
+  ],
   fonts: [],
   personSlot: {
     x: 335,
@@ -128,51 +141,19 @@ const DEFAULT_TEMPLATE = {
   ]
 };
 
-const PAGE_PRESETS = {
-  gold:   { slug:"gold",   label:"Vàng",   path:"gold/",   templateSlug:"unite-gold",   accent:"#e9bd55", tint:"#c89424", tintOpacity:0.00 },
-  red:    { slug:"red",    label:"Đỏ",     path:"red/",    templateSlug:"unite-red",    accent:"#e15b56", tint:"#b51f2b", tintOpacity:0.28 },
-  blue:   { slug:"blue",   label:"Xanh",   path:"blue/",   templateSlug:"unite-blue",   accent:"#5d9eff", tint:"#1555a6", tintOpacity:0.28 },
-  green:  { slug:"green",  label:"Lục",    path:"green/",  templateSlug:"unite-green",  accent:"#50c98b", tint:"#0c7b51", tintOpacity:0.24 },
-  purple: { slug:"purple", label:"Tím",    path:"purple/", templateSlug:"unite-purple", accent:"#a276ed", tint:"#6332a8", tintOpacity:0.27 }
-};
-
-// document.baseURI tự nhận đúng domain gốc lẫn project site dạng
-// https://username.github.io/repository/. Các trang màu có <base href="../">.
-const SITE_BASE_URL = new URL("./", document.baseURI);
-
-function detectPageSlug(){
-  const query = new URLSearchParams(location.search).get("page");
-  if(query && PAGE_PRESETS[query]) return query;
-  const segments = location.pathname.split("/").filter(Boolean);
-  const pageSegment = segments.find(segment => PAGE_PRESETS[segment]);
-  return pageSegment || "gold";
-}
-
-function getPageUrl(slug){
-  const page = PAGE_PRESETS[slug] || PAGE_PRESETS.gold;
-  return new URL(page.path, SITE_BASE_URL);
-}
-
-let currentPageSlug = detectPageSlug();
-let currentPage = PAGE_PRESETS[currentPageSlug];
-let backendReady = false;
-let backendWakePromise = null;
-let inlineEditingKey = null;
-let inlineOriginalValue = "";
-let tapCandidate = null;
-const processedImageCache = new Map();
-const drawableCache = new Map();
-const pendingBackgroundFiles = new Map();
-
 const SNAP_THRESHOLD = 14;
 const SLOT_HANDLE_SIZE = 20;
+const FOREGROUND_HANDLE_SIZE = 26;
+const BACKGROUND_SLOT_LIMIT = 5;
+const REMOVE_BG_MODULE_URL = "https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm";
 const MAX_PERSON_EDGE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? 1800 : 2400;
-const MAX_REMOVE_BG_EDGE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? 1500 : 1900;
+const MAX_REMOVE_BG_EDGE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? 1280 : 1600;
 const $ = (id) => document.getElementById(id);
 const canvas = $("posterCanvas");
-const ctx = canvas.getContext("2d", { willReadFrequently: true });
+const ctx = canvas.getContext("2d");
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const routeOptions = getRouteOptions();
 
 let template = structuredClone(DEFAULT_TEMPLATE);
 let bgImg = null;
@@ -182,6 +163,8 @@ let personSourceFile = null;
 let bgSourceFile = null;
 let fgSourceFile = null;
 let selectedFontFiles = [];
+let backgroundVariantFiles = new Map();
+let foregroundVariantFiles = new Map();
 let showSlot = true;
 let leaderGuidesVisible = true;
 let showTextGuides = true;
@@ -190,19 +173,33 @@ let cloudStatusState = "warn";
 let cloudTemplates = [];
 let selectedCloudSlug = null;
 let currentProfile = null;
+let selectedBackgroundId = routeOptions.backgroundId || "";
 
 let draggingPerson = false;
 let draggingText = false;
+let draggingLeaderText = false;
 let draggingSlot = false;
 let resizingSlot = false;
+let draggingForeground = false;
+let resizingForeground = false;
+let editForegroundMode = false;
 let lastTapAt = 0;
 let hideToastTimer = null;
 const activePointers = new Map();
 let pinchState = null;
-let selectedTextKey = "name";
-let dragStart = { x:0, y:0, px:0, py:0, fieldX:0, fieldY:0, slotX:0, slotY:0, slotW:0, slotH:0 };
+let selectedTextKey = "awardTitle";
+let dragStart = { x:0, y:0, px:0, py:0, fieldX:0, fieldY:0, slotX:0, slotY:0, slotW:0, slotH:0, fgX:0, fgY:0, fgW:0, fgH:0 };
 let textRenderBoxes = new Map();
 let snapState = { active:false, targetX:0, label:"Đã canh giữa" };
+let renderFrame = 0;
+let inlineEditorKey = null;
+let inlineEditorBeforeValue = "";
+let removeBgModulePromise = null;
+let leaderTextPress = null;
+let leaderTempTextCounter = 1;
+let leaderTempTextFields = [];
+let leaderTextOverrides = new Map();
+const imageCache = new Map();
 
 let person = {
   x: 0,
@@ -224,17 +221,13 @@ let exportCleanMode = false;
 let textValues = {};
 
 async function init(){
-  setupPageUI();
   setupCanvas();
   bindEvents();
-  registerServiceWorker();
-  backendWakePromise = warmBackend();
   if(isIOS && $("iosSavePanel")) $("iosSavePanel").hidden = false;
   resetRemoveBgProgress();
-  loadFonts().catch(() => null);
+  await loadFonts();
 
-  const localKey = `unite_poster_template_${currentPageSlug}`;
-  const saved = localStorage.getItem(localKey);
+  const saved = localStorage.getItem("unite_poster_template");
   if(saved){
     try {
       template = JSON.parse(saved);
@@ -242,65 +235,37 @@ async function init(){
     } catch(e) {}
   }
 
-  // Hiển thị nền local ngay, không chờ mạng/Supabase.
-  applyPageDefaults(true);
-  showCanvasLoading(true, `Đang mở trang ${currentPage.label}...`);
-  await applyCurrentTemplate();
-  showCanvasLoading(false);
-  setPublicTemplateInfo(`Đang dùng template local của trang <b>${escapeHtml(currentPage.label)}</b>, đồng thời kiểm tra bản cloud mới nhất.`);
-
-  // Sau khi preview đã hiện mới đồng bộ cloud ở nền.
   try {
-    const cloudTemplate = await withTimeoutPromise(loadActiveTemplate(currentPage.templateSlug), 10000, "Cloud phản hồi chậm");
+    const cloudTemplate = await loadActiveTemplate(routeOptions.templateSlug || null);
     if (cloudTemplate) {
       template = structuredClone(cloudTemplate);
       normalizeTemplate(template);
-      applyPageDefaults(false);
-      await applyCurrentTemplate();
-      setPublicTemplateInfo(`Đã đồng bộ template <b>${escapeHtml(currentPage.label)}</b> từ cloud.`);
+      setPublicTemplateInfo(`Đã nạp template active từ cloud: <b>${escapeHtml(template.templateName || template.templateId || 'Template')}</b>${routeOptions.templateSlug ? ` / slug: <b>${escapeHtml(routeOptions.templateSlug)}</b>` : ''}`);
       setCloudStatus('Cloud: đã kết nối', 'good');
     } else {
-      setPublicTemplateInfo(`Trang ${escapeHtml(currentPage.label)} chưa có template active. Admin có thể upload nền riêng và Lưu Active.`);
-      setCloudStatus('Cloud: chưa có template trang này', 'warn');
+      setPublicTemplateInfo('Cloud chưa có template active. Tool đang dùng template local / mặc định.');
+      setCloudStatus('Cloud: chưa có active template', 'warn');
     }
   } catch (err) {
     console.warn('Không load được template cloud lúc khởi động:', err);
-    setPublicTemplateInfo('Cloud đang chậm hoặc offline; preview local vẫn dùng bình thường.');
-    setCloudStatus('Cloud: dùng local', 'warn');
+    setPublicTemplateInfo('Không load được cloud lúc khởi động. Tool đang dùng template local / mặc định.');
+    setCloudStatus('Cloud: lỗi khi kiểm tra', 'bad');
   }
 
+  await applyCurrentTemplate();
   syncLeaderGuideButton();
   syncModeSwitchButton();
   syncCompactToolbarLabels();
-  refreshAuthStatus().catch(() => null);
-}
-
-function withTimeoutPromise(promise, timeoutMs, message = "Quá thời gian chờ"){
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), timeoutMs))
-  ]);
-}
-
-function applyPageDefaults(useFallbackTint = false){
-  normalizeTemplate(template);
-  template.templateId = currentPage.templateSlug;
-  template.templateName ||= `Unite Poster - ${currentPage.label}`;
-  template.page ||= {};
-  template.page.slug = currentPage.slug;
-  template.page.label = currentPage.label;
-  template.page.path = currentPage.path;
-  template.page.accent = currentPage.accent;
-  if(template.page.tintEnabled === undefined) template.page.tintEnabled = useFallbackTint && currentPage.tintOpacity > 0;
-  if(!template.page.tintColor) template.page.tintColor = currentPage.tint;
-  if(template.page.tintOpacity === undefined) template.page.tintOpacity = useFallbackTint ? currentPage.tintOpacity : 0;
-  document.documentElement.style.setProperty('--page-accent', currentPage.accent);
-  syncPageAdminControls();
+  scheduleIdleTask(() => preloadBackgroundVariants(), 500);
+  scheduleIdleTask(() => preloadRemoveBgModule(), 1400);
+  await refreshAuthStatus();
 }
 
 function normalizeTemplate(t){
   t.canvas ||= { width: 1229, height: 1536 };
   t.layers ||= {};
+  normalizeBackgroundVariants(t);
+  normalizeForegroundVariants(t);
   t.fonts ||= [];
   t.templateId ||= 'unite-template';
   t.templateName ||= t.templateId;
@@ -314,25 +279,172 @@ function normalizeTemplate(t){
     if(field.align === undefined) field.align = "center";
     if(field.fillType === undefined) field.fillType = 'solid';
   });
+  normalizeVariantLayouts(t);
+  applyActiveVariantLayout({ rebuild: false });
+}
+
+function normalizeBackgroundVariants(t){
+  const baseBackground = t.layers?.background || DEFAULT_TEMPLATE.layers.background;
+  const existing = Array.isArray(t.backgroundVariants) ? t.backgroundVariants : [];
+  const defaults = DEFAULT_TEMPLATE.backgroundVariants.map(item => ({ ...item }));
+  const merged = existing.length ? existing : defaults;
+
+  t.backgroundVariants = merged.slice(0, BACKGROUND_SLOT_LIMIT).map((item, index) => {
+    const fallback = defaults[index] || defaults[0];
+    return {
+      id: normalizeBackgroundId(fallback.id || item.id || `bg-${index + 1}`),
+      label: fallback.label || item.label || `Nền ${index + 1}`,
+      src: item.src || item.url || (index === 0 ? baseBackground : fallback.src || baseBackground),
+      storagePath: item.storagePath || null,
+      isDefault: Boolean(item.isDefault || index === 0)
+    };
+  });
+
+  while(t.backgroundVariants.length < BACKGROUND_SLOT_LIMIT){
+    const index = t.backgroundVariants.length;
+    const fallback = defaults[index] || defaults[0];
+    t.backgroundVariants.push({
+      id: normalizeBackgroundId(fallback.id || `bg-${index + 1}`),
+      label: fallback.label || `Nền ${index + 1}`,
+      src: fallback.src || baseBackground,
+      storagePath: null,
+      isDefault: index === 0
+    });
+  }
+
+  if(!t.backgroundVariants.some(item => item.isDefault)){
+    t.backgroundVariants[0].isDefault = true;
+  }
+
+  const wantedId = normalizeBackgroundId(selectedBackgroundId || routeOptions.backgroundId || "");
+  const selectedExists = wantedId && t.backgroundVariants.some(item => item.id === wantedId);
+  selectedBackgroundId = selectedExists
+    ? wantedId
+    : (getDefaultBackgroundVariant(t)?.id || t.backgroundVariants[0]?.id || "");
+
+  const active = getActiveBackgroundVariant(t);
+  if(active?.src) t.layers.background = active.src;
+}
+
+function normalizeForegroundVariants(t){
+  const baseForeground = t.layers?.foreground || DEFAULT_TEMPLATE.layers.foreground;
+  const existing = Array.isArray(t.foregroundVariants) ? t.foregroundVariants : [];
+  const defaults = DEFAULT_TEMPLATE.foregroundVariants.map(item => ({ ...item }));
+  const merged = existing.length ? existing : defaults;
+
+  t.foregroundVariants = merged.slice(0, BACKGROUND_SLOT_LIMIT).map((item, index) => {
+    const fallback = defaults[index] || defaults[0];
+    return {
+      id: normalizeBackgroundId(fallback.id || item.id || `fg-${index + 1}`),
+      label: fallback.label || item.label || `Bản trên ${index + 1}`,
+      src: item.src || item.url || baseForeground,
+      storagePath: item.storagePath || null,
+      isDefault: Boolean(item.isDefault || index === 0),
+      transform: normalizeForegroundTransform(item.transform, t.canvas)
+    };
+  });
+
+  while(t.foregroundVariants.length < BACKGROUND_SLOT_LIMIT){
+    const index = t.foregroundVariants.length;
+    const fallback = defaults[index] || defaults[0];
+    t.foregroundVariants.push({
+      id: normalizeBackgroundId(fallback.id || `fg-${index + 1}`),
+      label: fallback.label || `Bản trên ${index + 1}`,
+      src: fallback.src || baseForeground,
+      storagePath: null,
+      isDefault: index === 0,
+      transform: normalizeForegroundTransform(null, t.canvas)
+    });
+  }
+
+  if(!t.foregroundVariants.some(item => item.isDefault)){
+    t.foregroundVariants[0].isDefault = true;
+  }
+
+  const active = getActiveForegroundVariant(t);
+  if(active?.src) t.layers.foreground = active.src;
+}
+
+function normalizeForegroundTransform(transform, canvasDef = template.canvas){
+  const canvasWidth = Number(canvasDef?.width || canvas.width || 1229);
+  const canvasHeight = Number(canvasDef?.height || canvas.height || 1536);
+  const numberOr = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+  return {
+    x: numberOr(transform?.x, 0),
+    y: numberOr(transform?.y, 0),
+    width: Math.max(80, numberOr(transform?.width, canvasWidth)),
+    height: Math.max(80, numberOr(transform?.height, canvasHeight))
+  };
+}
+
+function normalizeVariantLayouts(t){
+  const baseLayout = makeLayoutSnapshot(t);
+  getBackgroundVariants(t).forEach((variant) => {
+    variant.layout = normalizeLayoutSnapshot(variant.layout, baseLayout);
+  });
+}
+
+function makeLayoutSnapshot(sourceTemplate = template){
+  return {
+    personSlot: structuredClone(sourceTemplate.personSlot || DEFAULT_TEMPLATE.personSlot),
+    textFields: structuredClone(sourceTemplate.textFields || DEFAULT_TEMPLATE.textFields)
+  };
+}
+
+function normalizeLayoutSnapshot(layout, fallbackLayout = makeLayoutSnapshot()){
+  const next = {
+    personSlot: structuredClone(layout?.personSlot || fallbackLayout.personSlot),
+    textFields: structuredClone(Array.isArray(layout?.textFields) ? layout.textFields : fallbackLayout.textFields)
+  };
+  next.personSlot ||= structuredClone(DEFAULT_TEMPLATE.personSlot);
+  next.textFields ||= structuredClone(DEFAULT_TEMPLATE.textFields);
+  next.textFields.forEach(field => {
+    if(field.draggable === undefined) field.draggable = true;
+    if(field.snapToCenter === undefined) field.snapToCenter = field.align !== "left" && field.align !== "right";
+    if(field.width === undefined) field.width = 600;
+    if(field.fontSize === undefined) field.fontSize = 36;
+    if(field.align === undefined) field.align = "center";
+    if(field.fillType === undefined) field.fillType = 'solid';
+  });
+  return next;
+}
+
+function syncActiveVariantLayout(){
+  const variant = getActiveBackgroundVariant();
+  if(!variant) return;
+  variant.layout = makeLayoutSnapshot();
+}
+
+function applyActiveVariantLayout({ rebuild = true } = {}){
+  const variant = getActiveBackgroundVariant();
+  if(!variant?.layout) return;
+  const layout = normalizeLayoutSnapshot(variant.layout, makeLayoutSnapshot());
+  template.personSlot = structuredClone(layout.personSlot);
+  template.textFields = structuredClone(layout.textFields);
+  if(rebuild){
+    ensureTextValues();
+    buildForms();
+    syncSlotInputs();
+    syncAdminTextCards();
+  }
 }
 
 async function applyCurrentTemplate(){
+  resetLeaderSessionLayout({ clearTemp:true, silent:true });
   setupCanvas();
   await loadFontsFromTemplate(template);
   await loadTemplateImages();
   syncTemplateMetaInputs();
   ensureTextValues();
   buildForms();
-  syncPageAdminControls();
   autoFitPerson();
   render();
 }
 
 function ensureTextValues(){
-  const savedDraft = loadPageDraft() || {};
   const next = {};
   template.textFields.forEach(field => {
-    next[field.key] = textValues[field.key] ?? savedDraft[field.key] ?? field.defaultValue ?? "";
+    next[field.key] = textValues[field.key] ?? field.defaultValue ?? "";
   });
   textValues = next;
 }
@@ -358,6 +470,7 @@ function bindEvents(){
     const file = e.target.files?.[0];
     if(!file) return;
     personSourceFile = file;
+    preloadRemoveBgModule();
     setRemoveBgStatus("Đang tối ưu ảnh cho điện thoại...");
     const rawImg = await fileToImage(file);
     personImg = await downscaleImageIfNeeded(rawImg, MAX_PERSON_EDGE);
@@ -376,11 +489,11 @@ function bindEvents(){
     if(!file) return;
     bgSourceFile = file;
     const dataUrl = await fileToDataURL(file);
-    template.layers.background = dataUrl;
-    template.page ||= {};
-    template.page.tintEnabled = false;
-    if($("pageTintEnabled")) $("pageTintEnabled").checked = false;
-    bgImg = await srcToImage(dataUrl);
+    setActiveBackgroundSource(dataUrl, file);
+    bgImg = await srcToImage(dataUrl, { cache:false });
+    buildBackgroundSwitcher();
+    buildBackgroundVariantAdmin();
+    showMobileToast("Đã cập nhật nền đang chọn");
     render();
   });
 
@@ -389,8 +502,10 @@ function bindEvents(){
     if(!file) return;
     fgSourceFile = file;
     const dataUrl = await fileToDataURL(file);
-    template.layers.foreground = dataUrl;
-    fgImg = await srcToImage(dataUrl);
+    setActiveForegroundSource(dataUrl, file);
+    fgImg = await srcToImage(dataUrl, { cache:false });
+    buildBackgroundVariantAdmin();
+    showMobileToast("Đã cập nhật bản trên đang chọn");
     render();
   });
 
@@ -414,7 +529,7 @@ function bindEvents(){
   $("btnDownloadTemplate").addEventListener("click", () => downloadJSON(template, `${template.templateId || "template"}.json`));
   $("btnSaveLocal").addEventListener("click", () => {
     try {
-      localStorage.setItem(`unite_poster_template_${currentPageSlug}`, JSON.stringify(template));
+      localStorage.setItem("unite_poster_template", JSON.stringify(template));
       alert("Đã lưu template trên trình duyệt này.");
     } catch(e) {
       alert("Template có thể quá nặng do ảnh base64. Nên để ảnh trong thư mục assets hoặc lưu qua Supabase.");
@@ -425,7 +540,15 @@ function bindEvents(){
   $("btnMobileFit").addEventListener("click", () => { mobileQuickFit(); render(); });
   $("btnExport").addEventListener("click", handleTopPrimaryAction);
   $("btnSharePoster").addEventListener("click", handleTopSecondaryAction);
-  $("btnRemoveBg").addEventListener("click", removeBackgroundSmart);
+  $("btnRemoveBg").addEventListener("click", removeBackgroundInBrowser);
+  if($("btnAddLeaderText")) $("btnAddLeaderText").addEventListener("click", addLeaderTempText);
+  if($("btnClearLeaderText")) $("btnClearLeaderText").addEventListener("click", clearLeaderTempText);
+  if($("btnResetLeaderLayout")) $("btnResetLeaderLayout").addEventListener("click", () => resetLeaderSessionLayout({ clearTemp:false }));
+  if($("btnDeleteSelectedTemp")) $("btnDeleteSelectedTemp").addEventListener("click", deleteSelectedLeaderTempText);
+  ["leaderFontSelect","leaderFontSize","leaderFontWeight","leaderFontColor","leaderTextAlign","leaderTextWidth"].forEach(id => {
+    if($(id)) $(id).addEventListener("input", (e) => updateLeaderSelectedTextStyle(e.target));
+    if($(id)) $(id).addEventListener("change", (e) => updateLeaderSelectedTextStyle(e.target));
+  });
   $("btnResetTone").addEventListener("click", () => { resetToneControls(true); render(); });
 
   $("scaleRange").addEventListener("input", e => { person.scale = Number(e.target.value); render(); });
@@ -443,9 +566,18 @@ function bindEvents(){
   $("showSlot").addEventListener("change", e => { showSlot = e.target.checked; render(); });
   $("showTextGuides").addEventListener("change", e => { showTextGuides = e.target.checked; render(); });
   ["slotX","slotY","slotW","slotH"].forEach(id => $(id).addEventListener("input", updateSlotFromInputs));
+  if($("editForegroundMode")) $("editForegroundMode").addEventListener("change", e => {
+    editForegroundMode = e.target.checked;
+    resetDragAndSnap();
+    render();
+  });
+  ["fgX","fgY","fgW","fgH"].forEach(id => {
+    if($(id)) $(id).addEventListener("input", updateForegroundTransformFromInputs);
+  });
+  if($("btnResetForegroundTransform")) $("btnResetForegroundTransform").addEventListener("click", resetForegroundTransform);
+  if($("btnFitForegroundOriginal")) $("btnFitForegroundOriginal").addEventListener("click", fitForegroundToOriginalRatio);
 
-  $("templateIdInput").readOnly = true;
-  $("templateIdInput").title = "Slug được khóa theo trang đang chọn";
+  $("templateIdInput").addEventListener("input", e => { template.templateId = e.target.value.trim(); });
   $("templateNameInput").addEventListener("input", e => { template.templateName = e.target.value.trim(); });
 
   $("btnAdminLogin").addEventListener("click", onAdminLogin);
@@ -453,43 +585,22 @@ function bindEvents(){
   $("btnRefreshProfile").addEventListener("click", refreshAuthStatus);
   $("btnSaveCloudDraft").addEventListener("click", () => onSaveCloud('draft'));
   $("btnSaveCloudActive").addEventListener("click", () => onSaveCloud('active'));
+  if($("btnAddAdminTextField")) $("btnAddAdminTextField").addEventListener("click", addAdminTextField);
   $("btnReloadCloudList").addEventListener("click", refreshCloudTemplates);
   $("btnLoadSelectedCloud").addEventListener("click", loadSelectedCloudTemplate);
   $("btnArchiveCloud").addEventListener("click", onArchiveSelectedCloud);
   $("btnReloadActiveCloud").addEventListener("click", reloadActiveCloudTemplate);
-
-  if($("pageSwitcher")) $("pageSwitcher").addEventListener("change", e => navigateToPage(e.target.value));
-  if($("copyPageLink")) $("copyPageLink").addEventListener("click", async e => {
-    e.preventDefault();
-    await navigator.clipboard?.writeText(getCurrentPageUrl());
-    showMobileToast("Đã copy link trang " + currentPage.label);
-  });
-  if($("btnOpenCurrentPage")) $("btnOpenCurrentPage").addEventListener("click", () => window.open(getCurrentPageUrl(), "_blank"));
-  if($("btnBatchSaveBackgrounds")) $("btnBatchSaveBackgrounds").addEventListener("click", saveBatchBackgrounds);
-  if($("pageTintEnabled")) $("pageTintEnabled").addEventListener("change", e => { template.page.tintEnabled = e.target.checked; render(); });
-  if($("pageTintColor")) $("pageTintColor").addEventListener("input", e => { template.page.tintColor = e.target.value; render(); });
-  if($("pageTintOpacity")) $("pageTintOpacity").addEventListener("input", e => { template.page.tintOpacity = Number(e.target.value); render(); });
-
-  if($("btnQuickUpload")) $("btnQuickUpload").addEventListener("click", () => $("personUpload").click());
-  if($("btnQuickRemoveBg")) $("btnQuickRemoveBg").addEventListener("click", removeBackgroundSmart);
-  if($("btnQuickFit")) $("btnQuickFit").addEventListener("click", () => { autoFitPerson(); render(); showMobileToast("Đã tự căn avatar"); });
-  if($("btnQuickText")) $("btnQuickText").addEventListener("click", () => openInlineTextEditor(selectedTextKey || "name"));
-
-  if($("inlineTextInput")) $("inlineTextInput").addEventListener("input", onInlineTextInput);
-  if($("inlineTextInput")) $("inlineTextInput").addEventListener("keydown", e => {
-    if(e.key === "Enter"){ e.preventDefault(); closeInlineTextEditor(true); }
-    if(e.key === "Escape"){ e.preventDefault(); closeInlineTextEditor(false); }
-  });
-  if($("inlineTextApply")) $("inlineTextApply").addEventListener("click", () => closeInlineTextEditor(true));
-  if($("inlineTextClose")) $("inlineTextClose").addEventListener("click", () => closeInlineTextEditor(false));
-  if($("inlineTextSmaller")) $("inlineTextSmaller").addEventListener("click", () => nudgeInlineFont(-2));
-  if($("inlineTextLarger")) $("inlineTextLarger").addEventListener("click", () => nudgeInlineFont(2));
   if($("btnHideIosTip")) $("btnHideIosTip").addEventListener("click", () => { const panel = $("iosSavePanel"); if(panel) panel.hidden = true; });
   if($("btnToggleGuides")) $("btnToggleGuides").addEventListener("click", () => {
     leaderGuidesVisible = !leaderGuidesVisible;
     syncLeaderGuideButton();
     render();
   });
+  if($("canvasTextEditor")){
+    $("canvasTextEditor").addEventListener("input", onInlineTextInput);
+    $("canvasTextEditor").addEventListener("keydown", onInlineTextKeyDown);
+    $("canvasTextEditor").addEventListener("blur", () => closeInlineTextEditor());
+  }
   if($("brandAdminTrigger")) {
     const toggleAdminFromLogo = () => {
       switchTab(activeTab === "admin" ? "leader" : "admin");
@@ -504,301 +615,12 @@ function bindEvents(){
     });
   }
 
-  canvas.addEventListener("dblclick", e => {
-    const p = canvasPoint(e);
-    const hit = hitTextBox(p.x, p.y);
-    if(hit) openInlineTextEditor(hit.key);
-  });
   canvas.addEventListener("pointerdown", pointerDown);
   canvas.addEventListener("pointermove", pointerMove);
   canvas.addEventListener("pointerleave", pointerLeave);
   canvas.addEventListener("pointercancel", pointerUp);
   window.addEventListener("pointerup", pointerUp);
   window.addEventListener("resize", () => { syncCompactToolbarLabels(); showMobileToast("Kéo 1 ngón • Chụm 2 ngón để zoom"); });
-}
-
-
-function setupPageUI(){
-  document.documentElement.style.setProperty('--page-accent', currentPage.accent);
-  document.title = `Unite Poster ${currentPage.label} · Studio Pro V7`;
-  const select = $("pageSwitcher");
-  if(select){
-    select.innerHTML = Object.values(PAGE_PRESETS).map(page => `<option value="${page.slug}" ${page.slug === currentPageSlug ? "selected" : ""}>${page.label}</option>`).join("");
-  }
-  const pageStatus = $("pageStatus");
-  if(pageStatus){
-    pageStatus.textContent = `Trang: ${currentPage.label}`;
-    pageStatus.style.borderColor = currentPage.accent;
-  }
-  const grid = $("channelAdminGrid");
-  if(grid){
-    grid.innerHTML = "";
-    Object.values(PAGE_PRESETS).forEach(page => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = `channel-card ${page.slug === currentPageSlug ? "active" : ""}`;
-      btn.style.setProperty("--channel-color", page.accent);
-      btn.textContent = page.label;
-      btn.addEventListener("click", () => navigateToPage(page.slug));
-      grid.appendChild(btn);
-    });
-  }
-  const batchGrid = $("batchBackgroundGrid");
-  if(batchGrid){
-    batchGrid.innerHTML = "";
-    Object.values(PAGE_PRESETS).forEach(page => {
-      const item = document.createElement("div");
-      item.className = "batch-bg-item";
-      item.style.setProperty("--channel-color", page.accent);
-      item.innerHTML = `<label><span class="batch-bg-preview"></span><span>${page.label}</span><input type="file" accept="image/*" data-page="${page.slug}"></label>`;
-      const input = item.querySelector("input");
-      const preview = item.querySelector(".batch-bg-preview");
-      input.addEventListener("change", () => {
-        const file = input.files?.[0];
-        if(!file) return;
-        pendingBackgroundFiles.set(page.slug, file);
-        item.classList.add("has-file");
-        preview.style.backgroundImage = `url(${URL.createObjectURL(file)})`;
-        updateBatchBackgroundStatus();
-      });
-      batchGrid.appendChild(item);
-    });
-  }
-  if($("adminCurrentChannelName")) $("adminCurrentChannelName").textContent = `Trang ${currentPage.label}`;
-  if($("adminCurrentChannelLink")) $("adminCurrentChannelLink").textContent = currentPage.path;
-}
-
-function navigateToPage(slug){
-  if(!PAGE_PRESETS[slug] || slug === currentPageSlug) return;
-  if(location.protocol === "file:"){
-    const url = new URL(location.href);
-    url.searchParams.set("page", slug);
-    location.href = url.toString();
-    return;
-  }
-  location.href = getPageUrl(slug).toString();
-}
-
-function getCurrentPageUrl(){
-  if(location.protocol === "file:"){
-    const url = new URL(location.href);
-    url.searchParams.set("page", currentPageSlug);
-    return url.toString();
-  }
-  return getPageUrl(currentPageSlug).toString();
-}
-
-function syncPageAdminControls(){
-  if(!template.page) return;
-  if($("pageTintEnabled")) $("pageTintEnabled").checked = Boolean(template.page.tintEnabled);
-  if($("pageTintColor")) $("pageTintColor").value = template.page.tintColor || currentPage.tint;
-  if($("pageTintOpacity")) $("pageTintOpacity").value = Number(template.page.tintOpacity ?? currentPage.tintOpacity);
-  if($("templateIdInput")) $("templateIdInput").value = currentPage.templateSlug;
-}
-
-function showCanvasLoading(visible, text = "Đang tải..."){
-  const el = $("canvasLoading");
-  if(!el) return;
-  el.hidden = !visible;
-  if($("canvasLoadingText")) $("canvasLoadingText").textContent = text;
-}
-
-async function warmBackend(){
-  if(backendWakePromise) return backendWakePromise;
-  backendWakePromise = (async () => {
-    setBackendStatus("AI: đang khởi động...", "warn");
-    try{
-      let response;
-      try{
-        response = await fetchWithTimeout(`${BACKEND_URL}/api/warmup`, { cache:"no-store" }, BACKEND_WARMUP_TIMEOUT_MS);
-      }catch(_){
-        response = await fetchWithTimeout(`${BACKEND_URL}/health`, { cache:"no-store" }, BACKEND_WARMUP_TIMEOUT_MS);
-      }
-      if(!response.ok) throw new Error(`HTTP ${response.status}`);
-      backendReady = true;
-      setBackendStatus("AI: sẵn sàng", "good");
-      return true;
-    }catch(err){
-      backendReady = false;
-      setBackendStatus("AI: dùng dự phòng", "warn");
-      console.warn("Backend warmup failed", err);
-      return false;
-    }
-  })();
-  return backendWakePromise;
-}
-
-function setBackendStatus(text, state="warn"){
-  const el = $("backendStatus");
-  if(!el) return;
-  el.textContent = text;
-  el.className = `pill compact-pill ${state}`;
-}
-
-async function fetchWithTimeout(url, options = {}, timeout = BACKEND_TIMEOUT_MS){
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-  try{
-    return await fetch(url, { ...options, signal:controller.signal });
-  }finally{
-    clearTimeout(timer);
-  }
-}
-
-function registerServiceWorker(){
-  if("serviceWorker" in navigator && location.protocol.startsWith("http")){
-    const workerUrl = new URL("sw.js", SITE_BASE_URL);
-    navigator.serviceWorker.register(workerUrl.href, { scope: SITE_BASE_URL.pathname })
-      .catch(err => console.warn("Service worker chưa đăng ký được", err));
-  }
-}
-
-function openInlineTextEditor(key){
-  const field = template.textFields.find(item => item.key === key);
-  const box = textRenderBoxes.get(key);
-  const editor = $("inlineTextEditor");
-  const input = $("inlineTextInput");
-  if(!field || !box || !editor || !input) return;
-  inlineEditingKey = key;
-  selectedTextKey = key;
-  inlineOriginalValue = textValues[key] ?? field.defaultValue ?? "";
-  input.value = inlineOriginalValue;
-  if($("inlineTextLabel")) $("inlineTextLabel").textContent = field.label || "Sửa nội dung";
-  editor.hidden = false;
-  positionInlineTextEditor(box);
-  render();
-  requestAnimationFrame(() => {
-    input.focus({ preventScroll:false });
-    input.select();
-  });
-}
-
-function positionInlineTextEditor(box){
-  const editor = $("inlineTextEditor");
-  if(!editor || window.innerWidth <= 900) return;
-  const canvasRect = canvas.getBoundingClientRect();
-  const shellRect = $("canvasShell").getBoundingClientRect();
-  const sx = canvasRect.width / canvas.width;
-  const sy = canvasRect.height / canvas.height;
-  const width = clamp(box.width * sx, 240, Math.max(240, shellRect.width - 18));
-  let left = canvasRect.left - shellRect.left + box.x * sx;
-  left = clamp(left, 8, Math.max(8, shellRect.width - width - 8));
-  let top = canvasRect.top - shellRect.top + box.y * sy - 118;
-  if(top < 8) top = canvasRect.top - shellRect.top + (box.y + box.height) * sy + 8;
-  editor.style.left = `${left}px`;
-  editor.style.top = `${top}px`;
-  editor.style.width = `${width}px`;
-}
-
-function onInlineTextInput(e){
-  if(!inlineEditingKey) return;
-  textValues[inlineEditingKey] = e.target.value;
-  const field = template.textFields.find(item => item.key === inlineEditingKey);
-  if(activeTab === "admin" && field) field.defaultValue = e.target.value;
-  syncLeaderTextInput(inlineEditingKey, e.target.value);
-  savePageDraft();
-  render();
-}
-
-function closeInlineTextEditor(apply = true){
-  if(!inlineEditingKey) return;
-  const key = inlineEditingKey;
-  if(!apply){
-    textValues[key] = inlineOriginalValue;
-    const field = template.textFields.find(item => item.key === key);
-    if(activeTab === "admin" && field) field.defaultValue = inlineOriginalValue;
-    syncLeaderTextInput(key, inlineOriginalValue);
-  }
-  inlineEditingKey = null;
-  const editor = $("inlineTextEditor");
-  if(editor) editor.hidden = true;
-  savePageDraft();
-  render();
-}
-
-function nudgeInlineFont(delta){
-  if(!inlineEditingKey) return;
-  const field = template.textFields.find(item => item.key === inlineEditingKey);
-  if(!field) return;
-  field.fontSize = clamp(Number(field.fontSize || 36) + delta, 12, 180);
-  updateAdminCardValues(field);
-  render();
-}
-
-function syncLeaderTextInput(key, value){
-  const input = document.querySelector(`#textForm input[data-key="${CSS.escape(key)}"]`);
-  if(input && input.value !== value) input.value = value;
-}
-
-function savePageDraft(){
-  try{
-    localStorage.setItem(`unite_poster_values_${currentPageSlug}`, JSON.stringify(textValues));
-  }catch(_){ }
-}
-
-function loadPageDraft(){
-  try{
-    const raw = localStorage.getItem(`unite_poster_values_${currentPageSlug}`);
-    return raw ? JSON.parse(raw) : null;
-  }catch(_){ return null; }
-}
-
-function updateBatchBackgroundStatus(){
-  const el = $("batchBackgroundStatus");
-  if(!el) return;
-  const count = pendingBackgroundFiles.size;
-  el.textContent = count ? `Đã chọn ${count}/5 nền. Bấm Lưu để cập nhật cùng lúc.` : "Có thể chọn một hoặc đủ 5 nền rồi lưu một lần.";
-}
-
-async function saveBatchBackgrounds(){
-  if(!pendingBackgroundFiles.size){
-    alert("Chọn ít nhất 1 ảnh nền trước nha.");
-    return;
-  }
-  const btn = $("btnBatchSaveBackgrounds");
-  const old = btn.textContent;
-  btn.disabled = true;
-  try{
-    let done = 0;
-    const total = pendingBackgroundFiles.size;
-    for(const [pageSlug, file] of pendingBackgroundFiles.entries()){
-      const page = PAGE_PRESETS[pageSlug];
-      btn.textContent = `Đang lưu ${++done}/${total}: ${page.label}`;
-      let pageTemplate = null;
-      try{ pageTemplate = await loadActiveTemplate(page.templateSlug); }catch(_){ }
-      if(!pageTemplate) pageTemplate = structuredClone(DEFAULT_TEMPLATE);
-      normalizeTemplate(pageTemplate);
-      pageTemplate.templateId = page.templateSlug;
-      pageTemplate.templateName = `Unite Poster - ${page.label}`;
-      pageTemplate.page = {
-        ...(pageTemplate.page || {}),
-        slug:page.slug,
-        label:page.label,
-        path:page.path,
-        accent:page.accent,
-        tintEnabled:false,
-        tintColor:page.tint,
-        tintOpacity:0
-      };
-      await saveTemplateToSupabase({
-        template:pageTemplate,
-        status:"active",
-        backgroundFile:file,
-        foregroundFile:null,
-        fontFiles:[]
-      });
-    }
-    pendingBackgroundFiles.clear();
-    updateBatchBackgroundStatus();
-    alert("Đã cập nhật các nền đã chọn thành Active cho từng link.");
-    await reloadActiveCloudTemplate();
-  }catch(err){
-    console.error(err);
-    alert(`Lưu nhiều nền lỗi: ${err.message || "Không xác định"}`);
-  }finally{
-    btn.disabled = false;
-    btn.textContent = old;
-  }
 }
 
 async function handleTopPrimaryAction(){
@@ -870,6 +692,7 @@ async function onAdminLogout(){
 }
 
 async function onSaveCloud(status){
+  syncActiveVariantLayout();
   syncTemplateMetaFromInputs();
   if(!template.templateId){
     alert('Nhập Template ID / slug trước khi lưu cloud nha.');
@@ -883,22 +706,25 @@ async function onSaveCloud(status){
     const saved = await saveTemplateToSupabase({
       template,
       status,
-      backgroundFile: bgSourceFile,
-      foregroundFile: fgSourceFile,
+      backgroundFile: backgroundVariantFiles.size ? null : bgSourceFile,
+      backgroundVariantFiles: getBackgroundVariantFilePayload(),
+      foregroundFile: foregroundVariantFiles.size ? null : fgSourceFile,
+      foregroundVariantFiles: getForegroundVariantFilePayload(),
       fontFiles: selectedFontFiles
     });
     template = structuredClone(saved.template_json);
     normalizeTemplate(template);
-    applyPageDefaults(false);
     await applyCurrentTemplate();
     await refreshCloudTemplates();
     selectedCloudSlug = saved.slug;
+    backgroundVariantFiles.clear();
+    foregroundVariantFiles.clear();
     bgSourceFile = null;
     fgSourceFile = null;
     selectedFontFiles = [];
-    if($("fontFilesInfo")) $("fontFilesInfo").textContent = "Chưa chọn font nào.";
-    setPublicTemplateInfo(`Cloud lưu thành công: <b>${escapeHtml(saved.name)}</b> (${escapeHtml(saved.status)})`);
-    alert(`Đã lưu template cloud thành công với status = ${saved.status}.`);
+    const persistenceSummary = describeTemplatePersistence(saved.template_json);
+    setPublicTemplateInfo(`Cloud lưu thành công: <b>${escapeHtml(saved.name)}</b> (${escapeHtml(saved.status)})<br>${persistenceSummary}`);
+    alert(`Đã lưu template cloud thành công với status = ${saved.status}.\n${stripHtml(persistenceSummary)}`);
     saveBtn.textContent = oldText;
     saveBtn.disabled = false;
   } catch (err) {
@@ -913,9 +739,7 @@ async function refreshCloudTemplates(requireAdmin = true){
   const listEl = $("cloudTemplatesList");
   listEl.innerHTML = '<div class="cloud-box mini-box">Đang tải danh sách template...</div>';
   try {
-    const allTemplates = requireAdmin ? await listAdminTemplates() : [];
-    cloudTemplates = allTemplates.filter(item => item.slug === currentPage.templateSlug);
-    selectedCloudSlug = cloudTemplates[0]?.slug || null;
+    cloudTemplates = requireAdmin ? await listAdminTemplates() : [];
     renderCloudTemplateList();
   } catch (err) {
     cloudTemplates = [];
@@ -926,7 +750,7 @@ async function refreshCloudTemplates(requireAdmin = true){
 function renderCloudTemplateList(){
   const listEl = $("cloudTemplatesList");
   if(!cloudTemplates.length){
-    listEl.innerHTML = `<div class="cloud-box mini-box">Trang ${escapeHtml(currentPage.label)} chưa có template cloud hoặc admin chưa đăng nhập.</div>`;
+    listEl.innerHTML = '<div class="cloud-box mini-box">Chưa có danh sách template hoặc chưa đăng nhập admin.</div>';
     return;
   }
   listEl.innerHTML = '';
@@ -972,14 +796,13 @@ async function loadSelectedCloudTemplate(){
 
 async function reloadActiveCloudTemplate(){
   try {
-    const cloudTemplate = await loadActiveTemplate(currentPage.templateSlug);
+    const cloudTemplate = await loadActiveTemplate();
     if (!cloudTemplate) {
       alert('Cloud chưa có template active.');
       return;
     }
     template = structuredClone(cloudTemplate);
     normalizeTemplate(template);
-    applyPageDefaults(false);
     await applyCurrentTemplate();
     setPublicTemplateInfo(`Đã load active cloud: <b>${escapeHtml(template.templateName || template.templateId)}</b>`);
   } catch (err) {
@@ -1079,43 +902,45 @@ function syncCompactToolbarLabels(){
 
 function switchTab(tabName){
   const safeTab = tabName === "admin" ? "admin" : "leader";
+  closeInlineTextEditor();
   document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.tab === safeTab));
   document.querySelectorAll(".tab-pane").forEach(p => p.classList.toggle("active", p.id === `${safeTab}Tab`));
   activeTab = safeTab;
   const hint = $("canvasHint");
   if(hint){
     hint.textContent = activeTab === "admin"
-      ? "Admin: kéo chữ, kéo vùng người hoặc kéo nút resize ở góc phải dưới."
-      : "Leader: kéo ảnh người, chụm 2 ngón để zoom trên điện thoại.";
+      ? "Admin: kéo chữ, vùng người; bật chế độ bản trên để kéo/resize foreground."
+      : "Leader: kéo ảnh người, kéo mọi vùng chữ; thay đổi chỉ tồn tại trong phiên.";
   }
   syncModeSwitchButton();
   syncLeaderGuideButton();
   syncCompactToolbarLabels();
+  syncLeaderTextStylePanel();
+  syncForegroundTransformInputs();
   snapState.active = false;
   render();
 }
 
 function syncTemplateMetaInputs(){
-  $("templateIdInput").value = currentPage.templateSlug;
-  $("templateNameInput").value = template.templateName || `Unite Poster - ${currentPage.label}`;
+  $("templateIdInput").value = template.templateId || '';
+  $("templateNameInput").value = template.templateName || '';
 }
 
 function syncTemplateMetaFromInputs(){
-  template.templateId = currentPage.templateSlug;
-  template.templateName = $("templateNameInput").value.trim() || template.templateName || `Unite Poster - ${currentPage.label}`;
-  template.page ||= {};
-  template.page.slug = currentPage.slug;
-  template.page.label = currentPage.label;
-  template.page.path = currentPage.path;
-  template.page.accent = currentPage.accent;
+  template.templateId = $("templateIdInput").value.trim() || template.templateId || 'unite-template';
+  template.templateName = $("templateNameInput").value.trim() || template.templateName || template.templateId;
 }
 
 function resetDragAndSnap(){
-  const changed = draggingPerson || draggingText || draggingSlot || resizingSlot || snapState.active || pinchState || activePointers.size;
+  const changed = draggingPerson || draggingText || draggingLeaderText || draggingSlot || resizingSlot || draggingForeground || resizingForeground || snapState.active || pinchState || activePointers.size || leaderTextPress;
   draggingPerson = false;
   draggingText = false;
+  draggingLeaderText = false;
   draggingSlot = false;
   resizingSlot = false;
+  draggingForeground = false;
+  resizingForeground = false;
+  leaderTextPress = null;
   pinchState = null;
   activePointers.clear();
   if(snapState.active){ snapState.active = false; }
@@ -1123,12 +948,29 @@ function resetDragAndSnap(){
 }
 
 async function loadTemplateImages(){
-  const [background, foreground] = await Promise.all([
-    template.layers.background ? loadCachedDrawable(template.layers.background) : Promise.resolve(null),
-    template.layers.foreground ? loadCachedDrawable(template.layers.foreground) : Promise.resolve(null)
+  const bgSrc = getActiveBackgroundSrc();
+  const fgSrc = getActiveForegroundSrc();
+  template.layers.background = bgSrc || template.layers.background;
+  template.layers.foreground = fgSrc || template.layers.foreground;
+  [bgImg, fgImg] = await Promise.all([
+    bgSrc ? srcToImage(bgSrc) : null,
+    fgSrc ? srcToImage(fgSrc) : null
   ]);
-  bgImg = background;
-  fgImg = foreground;
+  preloadBackgroundVariants();
+  preloadForegroundVariants();
+}
+
+async function loadActiveBackgroundImage(){
+  const bgSrc = getActiveBackgroundSrc();
+  const fgSrc = getActiveForegroundSrc();
+  template.layers.background = bgSrc || template.layers.background;
+  template.layers.foreground = fgSrc || template.layers.foreground;
+  [bgImg, fgImg] = await Promise.all([
+    bgSrc ? srcToImage(bgSrc) : null,
+    fgSrc ? srcToImage(fgSrc) : null
+  ]);
+  preloadBackgroundVariants();
+  preloadForegroundVariants();
 }
 
 function buildForms(){
@@ -1142,13 +984,523 @@ function buildForms(){
     input.type = "text";
     input.dataset.key = field.key;
     input.value = textValues[field.key];
-    input.addEventListener("input", () => { textValues[field.key] = input.value; if(activeTab === "admin") field.defaultValue = input.value; savePageDraft(); render(); });
+    input.addEventListener("focus", () => selectLeaderTextField(field.key));
+    input.addEventListener("input", () => { textValues[field.key] = input.value; render(); });
+    label.appendChild(input);
+    form.appendChild(label);
+  });
+  leaderTempTextFields.forEach(field => {
+    if(textValues[field.key] === undefined) textValues[field.key] = field.defaultValue || "";
+    const label = document.createElement("label");
+    label.className = "temp-text-label";
+    label.textContent = field.label || field.key;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.dataset.key = field.key;
+    input.value = textValues[field.key];
+    input.addEventListener("focus", () => selectLeaderTextField(field.key));
+    input.addEventListener("input", () => { textValues[field.key] = input.value; render(); });
     label.appendChild(input);
     form.appendChild(label);
   });
 
+  buildBackgroundSwitcher();
+  buildBackgroundVariantAdmin();
   syncSlotInputs();
+  syncForegroundTransformInputs();
   syncAdminTextCards();
+  syncLeaderTextStylePanel();
+}
+
+function getDrawableTextFields(){
+  const baseFields = template.textFields.map(field => {
+    if(activeTab !== "leader") return field;
+    return leaderTextOverrides.get(field.key) || field;
+  });
+  return activeTab === "leader" ? [...baseFields, ...leaderTempTextFields] : baseFields;
+}
+
+function findTextFieldByKey(key){
+  if(activeTab === "leader"){
+    const temporary = leaderTempTextFields.find(field => field.key === key);
+    if(temporary) return temporary;
+    return leaderTextOverrides.get(key) || template.textFields.find(field => field.key === key);
+  }
+  return template.textFields.find(field => field.key === key);
+}
+
+function isLeaderTempTextKey(key){
+  return leaderTempTextFields.some(field => field.key === key);
+}
+
+function ensureLeaderTextOverride(key){
+  if(isLeaderTempTextKey(key)) return leaderTempTextFields.find(field => field.key === key) || null;
+  if(leaderTextOverrides.has(key)) return leaderTextOverrides.get(key);
+  const source = template.textFields.find(field => field.key === key);
+  if(!source) return null;
+  const override = structuredClone(source);
+  leaderTextOverrides.set(key, override);
+  return override;
+}
+
+function selectLeaderTextField(key){
+  selectedTextKey = key;
+  syncLeaderTextStylePanel();
+  render();
+}
+
+function resetLeaderSessionLayout({ clearTemp = false, silent = false } = {}){
+  closeInlineTextEditor();
+  leaderTextOverrides.clear();
+  if(clearTemp){
+    leaderTempTextFields.forEach(field => delete textValues[field.key]);
+    leaderTempTextFields = [];
+    leaderTempTextCounter = 1;
+  }
+  if(!findTextFieldByKey(selectedTextKey)) selectedTextKey = template.textFields[0]?.key || "awardTitle";
+  if(!silent){
+    if($("textForm")) buildForms();
+    showMobileToast(clearTemp ? "Đã làm mới chỉnh sửa tạm" : "Đã khôi phục vị trí/style gốc");
+    render();
+  }
+}
+
+function getLeaderFontOptions(){
+  const builtIn = [
+    { label:"Montserrat", value:"Montserrat, Arial, sans-serif" },
+    { label:"Inter", value:"Inter, Arial, sans-serif" },
+    { label:"Playfair Display", value:"Playfair Display, Georgia, serif" },
+    { label:"Arial", value:"Arial, sans-serif" },
+    { label:"Georgia", value:"Georgia, serif" }
+  ];
+  const uploaded = (template.fonts || [])
+    .filter(font => font?.family)
+    .map(font => ({ label:`Admin · ${font.name || font.family}`, value:`${font.family}, Arial, sans-serif` }));
+  const seen = new Set();
+  return [...builtIn, ...uploaded].filter(item => {
+    if(seen.has(item.value)) return false;
+    seen.add(item.value);
+    return true;
+  });
+}
+
+function syncLeaderTextStylePanel(){
+  const panel = $("leaderTextStylePanel");
+  if(!panel) return;
+  const field = activeTab === "leader" ? findTextFieldByKey(selectedTextKey) : null;
+  panel.hidden = !field;
+  if(!field) return;
+  const name = $("leaderSelectedTextName");
+  const type = $("leaderSelectedTextType");
+  if(name) name.textContent = field.label || field.key;
+  const isTemp = isLeaderTempTextKey(field.key);
+  const isOverride = leaderTextOverrides.has(field.key);
+  if(type) type.textContent = isTemp ? "Vùng chữ tạm · không lưu cloud" : (isOverride ? "Đã tùy chỉnh tạm · không lưu cloud" : "Vùng có sẵn · kéo/style chỉ trong phiên");
+
+  const fontSelect = $("leaderFontSelect");
+  if(fontSelect){
+    const options = getLeaderFontOptions();
+    const current = field.fontFamily || "Arial, sans-serif";
+    if(!options.some(item => item.value === current)) options.unshift({ label:"Font hiện tại", value:current });
+    fontSelect.innerHTML = options.map(item => `<option value="${escapeAttr(item.value)}">${escapeHtml(item.label)}</option>`).join("");
+    fontSelect.value = current;
+  }
+  if($("leaderFontSize")) $("leaderFontSize").value = Math.round(Number(field.fontSize || 36));
+  if($("leaderFontWeight")) $("leaderFontWeight").value = String(field.fontWeight || "700");
+  if($("leaderFontColor")) $("leaderFontColor").value = toHex(field.color || "#ffffff");
+  if($("leaderTextAlign")) $("leaderTextAlign").value = field.align || "center";
+  if($("leaderTextWidth")) $("leaderTextWidth").value = Math.round(Number(field.width || 600));
+  if($("btnDeleteSelectedTemp")) $("btnDeleteSelectedTemp").hidden = !isTemp;
+}
+
+function updateLeaderSelectedTextStyle(control){
+  if(activeTab !== "leader" || !control) return;
+  const field = ensureLeaderTextOverride(selectedTextKey);
+  if(!field) return;
+  if(control.id === "leaderFontSelect") field.fontFamily = control.value;
+  if(control.id === "leaderFontSize") field.fontSize = clamp(Number(control.value || 36), 12, 220);
+  if(control.id === "leaderFontWeight") field.fontWeight = String(control.value || "700");
+  if(control.id === "leaderFontColor"){
+    field.color = control.value;
+    if(field.fillType === "gradient") field.fillType = "solid";
+  }
+  if(control.id === "leaderTextAlign") field.align = control.value || "center";
+  if(control.id === "leaderTextWidth") field.width = clamp(Number(control.value || 600), 80, canvas.width);
+  syncLeaderTextStylePanel();
+  render();
+}
+
+function deleteSelectedLeaderTempText(){
+  if(!isLeaderTempTextKey(selectedTextKey)) return;
+  const index = leaderTempTextFields.findIndex(field => field.key === selectedTextKey);
+  if(index < 0) return;
+  const [removed] = leaderTempTextFields.splice(index, 1);
+  delete textValues[removed.key];
+  selectedTextKey = template.textFields[0]?.key || leaderTempTextFields[0]?.key || "awardTitle";
+  buildForms();
+  showMobileToast("Đã xóa vùng chữ tạm đang chọn");
+  render();
+}
+
+function cloneTextFieldForNewArea(sourceField, overrides = {}){
+  const base = structuredClone(sourceField || template.textFields[0] || DEFAULT_TEMPLATE.textFields[0]);
+  return {
+    ...base,
+    ...overrides,
+    gradient: base.gradient ? structuredClone(base.gradient) : undefined,
+    draggable: overrides.draggable ?? true,
+    snapToCenter: overrides.snapToCenter ?? true
+  };
+}
+
+function addLeaderTempText(){
+  const source = findTextFieldByKey(selectedTextKey) || template.textFields[0] || DEFAULT_TEMPLATE.textFields[0];
+  const key = `leaderTemp_${Date.now()}_${leaderTempTextCounter++}`;
+  const field = cloneTextFieldForNewArea(source, {
+    key,
+    label: `Chữ tạm ${leaderTempTextCounter - 1}`,
+    defaultValue: "CHỮ TẠM",
+    x: canvas.width / 2,
+    y: Math.round(canvas.height * 0.52),
+    width: Math.min(source.width || 620, canvas.width - 120),
+    fontSize: Math.min(Math.max(source.fontSize || 42, 28), 54)
+  });
+  leaderTempTextFields.push(field);
+  textValues[key] = field.defaultValue;
+  selectedTextKey = key;
+  buildForms();
+  showMobileToast("Đã thêm chữ tạm • kéo chữ trên poster để đặt vị trí");
+  render(true);
+  requestAnimationFrame(() => openInlineTextEditor(key));
+}
+
+function clearLeaderTempText(){
+  if(!leaderTempTextFields.length){
+    showMobileToast("Chưa có chữ tạm để xóa");
+    return;
+  }
+  closeInlineTextEditor();
+  leaderTempTextFields.forEach(field => delete textValues[field.key]);
+  leaderTempTextFields = [];
+  leaderTempTextCounter = 1;
+  selectedTextKey = template.textFields[0]?.key || "awardTitle";
+  buildForms();
+  showMobileToast("Đã xóa toàn bộ chữ tạm");
+  render();
+}
+
+function addAdminTextField(){
+  syncActiveVariantLayout();
+  const source = template.textFields.find(field => field.key === selectedTextKey) || template.textFields[0] || DEFAULT_TEMPLATE.textFields[0];
+  const key = `customText_${Date.now()}`;
+  const field = cloneTextFieldForNewArea(source, {
+    key,
+    label: "Vùng chữ mới",
+    defaultValue: "CHỮ MỚI",
+    x: canvas.width / 2,
+    y: Math.round(canvas.height * 0.58),
+    width: Math.min(source.width || 620, canvas.width - 120),
+    fontSize: Math.min(Math.max(source.fontSize || 42, 26), 58)
+  });
+  template.textFields.push(field);
+  textValues[key] = field.defaultValue;
+  selectedTextKey = key;
+  syncActiveVariantLayout();
+  buildForms();
+  showMobileToast("Admin đã thêm vùng chữ cho màu đang chọn");
+  render();
+}
+
+function deleteAdminTextField(key){
+  const index = template.textFields.findIndex(field => field.key === key);
+  if(index < 0) return;
+  if(template.textFields.length <= 1){
+    alert("Template cần giữ ít nhất 1 vùng chữ.");
+    return;
+  }
+  if(!confirm("Xóa vùng chữ này khỏi layout màu đang chọn?")) return;
+  const [removed] = template.textFields.splice(index, 1);
+  delete textValues[removed.key];
+  selectedTextKey = template.textFields[Math.max(0, index - 1)]?.key || template.textFields[0]?.key || "";
+  syncActiveVariantLayout();
+  buildForms();
+  render();
+}
+
+function buildBackgroundSwitcher(){
+  const wrap = $("backgroundSwitcher");
+  if(!wrap) return;
+  const variants = getBackgroundVariants();
+  wrap.innerHTML = "";
+  variants.forEach((variant, index) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `background-chip ${variant.id === selectedBackgroundId ? "active" : ""}`;
+    btn.dataset.bg = variant.id;
+    btn.innerHTML = `<span>${index + 1}</span><div><small>Trang ${index + 1}</small><b>${escapeHtml(variant.label || variant.id)}</b></div>`;
+    btn.addEventListener("click", () => selectBackgroundVariant(variant.id, { updateUrl:true }));
+    wrap.appendChild(btn);
+  });
+}
+
+function buildBackgroundVariantAdmin(){
+  const wrap = $("backgroundVariantAdmin");
+  if(!wrap) return;
+  wrap.innerHTML = "";
+  getBackgroundVariants().forEach((variant, index) => {
+    const card = document.createElement("div");
+    card.className = `background-variant-card ${variant.id === selectedBackgroundId ? "selected" : ""}`;
+    card.dataset.bg = variant.id;
+    card.innerHTML = `
+      <div class="background-variant-top">
+        <strong>Link ${index + 1} - ${escapeHtml(variant.label || variant.id)}</strong>
+        <em>Layout riêng</em>
+        <button type="button" class="soft mini" data-bg-action="select">Chọn</button>
+      </div>
+      <div class="field-grid two">
+        <label>Tên màu <input data-bg-field="label" type="text" value="${escapeAttr(variant.label || '')}"></label>
+        <label>Slug trang <input data-bg-field="id" type="text" value="${escapeAttr(variant.id || '')}" readonly></label>
+      </div>
+      <label class="filebox small bg-filebox">
+        <input data-bg-action="file" type="file" accept="image/*">
+        <span>Upload nền dưới link ${index + 1}</span>
+      </label>
+      <label class="filebox small fg-filebox">
+        <input data-fg-action="file" type="file" accept="image/*">
+        <span>Upload bản trên PNG link ${index + 1}</span>
+      </label>
+      <div class="background-link-row">
+        <input data-bg-field="link" type="text" value="${escapeAttr(buildBackgroundLink(variant.id))}" readonly>
+        <button type="button" class="soft mini" data-bg-action="copy">Copy</button>
+      </div>
+    `;
+
+    card.querySelector('[data-bg-action="select"]').addEventListener("click", () => selectBackgroundVariant(variant.id, { updateUrl:true }));
+    card.querySelector('[data-bg-action="copy"]').addEventListener("click", () => copyBackgroundLink(variant.id));
+    card.querySelector('[data-bg-action="file"]').addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      if(!file) return;
+      const dataUrl = await fileToDataURL(file);
+      variant.src = dataUrl;
+      backgroundVariantFiles.set(variant.id, file);
+      if(variant.id === selectedBackgroundId){
+        template.layers.background = dataUrl;
+        bgImg = await srcToImage(dataUrl, { cache:false });
+        render();
+      }
+      buildBackgroundSwitcher();
+      buildBackgroundVariantAdmin();
+      showMobileToast(`Đã cập nhật ${variant.label || variant.id}`);
+    });
+    card.querySelector('[data-fg-action="file"]').addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      if(!file) return;
+      const dataUrl = await fileToDataURL(file);
+      setForegroundVariantSource(variant.id, dataUrl, file);
+      if(variant.id === selectedBackgroundId){
+        template.layers.foreground = dataUrl;
+        fgImg = await srcToImage(dataUrl, { cache:false });
+        render();
+      }
+      buildBackgroundVariantAdmin();
+      showMobileToast(`Đã cập nhật bản trên ${variant.label || variant.id}`);
+    });
+
+    card.querySelectorAll('[data-bg-field]').forEach((input) => {
+      if(input.dataset.bgField === "link") return;
+      input.addEventListener("input", () => updateBackgroundVariantField(variant, input, { rebuildAdmin:false }));
+      input.addEventListener("change", () => updateBackgroundVariantField(variant, input, { rebuildAdmin:true }));
+    });
+    wrap.appendChild(card);
+  });
+}
+
+function updateBackgroundVariantField(variant, input, { rebuildAdmin = true } = {}){
+  const field = input.dataset.bgField;
+  if(field === "label"){
+    variant.label = input.value.trim() || variant.id;
+    const foregroundVariant = getForegroundVariants().find(item => item.id === variant.id);
+    if(foregroundVariant) foregroundVariant.label = variant.label;
+  }
+  if(field === "id"){
+    const oldId = variant.id;
+    const nextId = normalizeBackgroundId(input.value || oldId);
+    variant.id = nextId;
+    input.value = nextId;
+    if(selectedBackgroundId === oldId) selectedBackgroundId = nextId;
+    if(backgroundVariantFiles.has(oldId)){
+      backgroundVariantFiles.set(nextId, backgroundVariantFiles.get(oldId));
+      backgroundVariantFiles.delete(oldId);
+    }
+    if(foregroundVariantFiles.has(oldId)){
+      foregroundVariantFiles.set(nextId, foregroundVariantFiles.get(oldId));
+      foregroundVariantFiles.delete(oldId);
+    }
+  }
+  buildBackgroundSwitcher();
+  if(rebuildAdmin) buildBackgroundVariantAdmin();
+  render();
+}
+
+function getBackgroundVariants(sourceTemplate = template){
+  return Array.isArray(sourceTemplate.backgroundVariants) ? sourceTemplate.backgroundVariants.slice(0, BACKGROUND_SLOT_LIMIT) : [];
+}
+
+function getDefaultBackgroundVariant(sourceTemplate = template){
+  const variants = getBackgroundVariants(sourceTemplate);
+  return variants.find(item => item.isDefault) || variants[0] || null;
+}
+
+function getActiveBackgroundVariant(sourceTemplate = template){
+  const variants = getBackgroundVariants(sourceTemplate);
+  return variants.find(item => item.id === selectedBackgroundId) || getDefaultBackgroundVariant(sourceTemplate);
+}
+
+function getActiveBackgroundSrc(){
+  return getActiveBackgroundVariant()?.src || template.layers?.background || "";
+}
+
+function getForegroundVariants(sourceTemplate = template){
+  return Array.isArray(sourceTemplate.foregroundVariants) ? sourceTemplate.foregroundVariants.slice(0, BACKGROUND_SLOT_LIMIT) : [];
+}
+
+function getActiveForegroundVariant(sourceTemplate = template){
+  const variants = getForegroundVariants(sourceTemplate);
+  return variants.find(item => item.id === selectedBackgroundId) || variants.find(item => item.isDefault) || variants[0] || null;
+}
+
+function getActiveForegroundSrc(){
+  return getActiveForegroundVariant()?.src || template.layers?.foreground || "";
+}
+
+function getActiveForegroundTransform(){
+  const variant = getActiveForegroundVariant();
+  if(!variant) return normalizeForegroundTransform(null, template.canvas);
+  variant.transform = normalizeForegroundTransform(variant.transform, template.canvas);
+  return variant.transform;
+}
+
+function syncForegroundTransformInputs(){
+  const transform = getActiveForegroundTransform();
+  if($("fgX")) $("fgX").value = Math.round(transform.x);
+  if($("fgY")) $("fgY").value = Math.round(transform.y);
+  if($("fgW")) $("fgW").value = Math.round(transform.width);
+  if($("fgH")) $("fgH").value = Math.round(transform.height);
+  if($("editForegroundMode")) $("editForegroundMode").checked = editForegroundMode;
+}
+
+function updateForegroundTransformFromInputs(){
+  const transform = getActiveForegroundTransform();
+  transform.x = Number($("fgX")?.value || 0);
+  transform.y = Number($("fgY")?.value || 0);
+  transform.width = Math.max(80, Number($("fgW")?.value || canvas.width));
+  transform.height = Math.max(80, Number($("fgH")?.value || canvas.height));
+  render();
+}
+
+function resetForegroundTransform(){
+  const variant = getActiveForegroundVariant();
+  if(!variant) return;
+  variant.transform = normalizeForegroundTransform(null, template.canvas);
+  syncForegroundTransformInputs();
+  render();
+  showMobileToast("Bản trên đã phủ toàn poster");
+}
+
+function fitForegroundToOriginalRatio(){
+  const variant = getActiveForegroundVariant();
+  if(!variant || !fgImg) return;
+  const scale = Math.min(canvas.width / fgImg.width, canvas.height / fgImg.height);
+  const width = Math.max(80, fgImg.width * scale);
+  const height = Math.max(80, fgImg.height * scale);
+  variant.transform = {
+    x: Math.round((canvas.width - width) / 2),
+    y: Math.round((canvas.height - height) / 2),
+    width: Math.round(width),
+    height: Math.round(height)
+  };
+  syncForegroundTransformInputs();
+  render();
+  showMobileToast("Đã giữ đúng tỷ lệ bản trên");
+}
+
+function setActiveBackgroundSource(src, file = null){
+  const variant = getActiveBackgroundVariant();
+  if(variant){
+    variant.src = src;
+    if(file) backgroundVariantFiles.set(variant.id, file);
+  }
+  template.layers.background = src;
+}
+
+function setForegroundVariantSource(id, src, file = null){
+  const variant = getForegroundVariants().find(item => item.id === id);
+  if(variant){
+    variant.src = src;
+    if(file) foregroundVariantFiles.set(variant.id, file);
+  }
+}
+
+function setActiveForegroundSource(src, file = null){
+  const variant = getActiveForegroundVariant();
+  if(variant){
+    variant.src = src;
+    if(file) foregroundVariantFiles.set(variant.id, file);
+  }
+  template.layers.foreground = src;
+}
+
+async function selectBackgroundVariant(id, { updateUrl = false } = {}){
+  const nextId = normalizeBackgroundId(id);
+  const variants = getBackgroundVariants();
+  if(!variants.some(item => item.id === nextId)) return;
+  if(activeTab === "leader" && (leaderTextOverrides.size || leaderTempTextFields.length)){
+    resetLeaderSessionLayout({ clearTemp:true, silent:true });
+  }
+  syncActiveVariantLayout();
+  selectedBackgroundId = nextId;
+  applyActiveVariantLayout({ rebuild:true });
+  await loadActiveBackgroundImage();
+  buildBackgroundSwitcher();
+  buildBackgroundVariantAdmin();
+  syncForegroundTransformInputs();
+  if(updateUrl) writeBackgroundRoute(nextId);
+  showMobileToast(getActiveBackgroundVariant()?.label || nextId);
+  render();
+}
+
+function getBackgroundVariantFilePayload(){
+  return [...backgroundVariantFiles.entries()].map(([id, file]) => ({ id, file })).filter(item => item.file);
+}
+
+function getForegroundVariantFilePayload(){
+  return [...foregroundVariantFiles.entries()].map(([id, file]) => ({ id, file })).filter(item => item.file);
+}
+
+function buildBackgroundLink(id){
+  const bgId = normalizeBackgroundId(id);
+  const url = new URL(`${bgId}.html`, window.location.href);
+  if(template.templateId) url.searchParams.set("template", template.templateId);
+  return url.href;
+}
+
+function writeBackgroundRoute(id){
+  const url = new URL(window.location.href);
+  const bgId = normalizeBackgroundId(id);
+  url.searchParams.set("bg", bgId);
+  url.searchParams.set("page", bgId);
+  if(routeOptions.templateSlug || template.templateId) url.searchParams.set("template", routeOptions.templateSlug || template.templateId);
+  window.history.replaceState({}, "", url);
+}
+
+async function copyBackgroundLink(id){
+  const link = buildBackgroundLink(id);
+  try {
+    await navigator.clipboard.writeText(link);
+    showMobileToast("Đã copy link nền");
+  } catch (err) {
+    window.prompt("Copy link nền:", link);
+  }
 }
 
 function syncSlotInputs(){
@@ -1167,7 +1519,10 @@ function syncAdminTextCards(){
     card.dataset.key = field.key;
     const grad = normalizeGradient(field);
     card.innerHTML = `
-      <strong>${escapeHtml(field.label || field.key)}</strong>
+      <div class="field-card-title">
+        <strong>${escapeHtml(field.label || field.key)}</strong>
+        <button type="button" class="soft mini danger" data-action="delete-text">Xóa</button>
+      </div>
       <label>Giá trị mặc định <input data-field="defaultValue" type="text" value="${escapeAttr(field.defaultValue || "")}"></label>
       <div class="field-grid four">
         <label>X <input data-field="x" type="number" value="${field.x}"></label>
@@ -1241,6 +1596,13 @@ function syncAdminTextCards(){
       syncAdminTextCards();
       render();
     });
+    const deleteBtn = card.querySelector('[data-action="delete-text"]');
+    if(deleteBtn){
+      deleteBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteAdminTextField(field.key);
+      });
+    }
     card.querySelectorAll("input,select").forEach(input => {
       input.addEventListener("click", e => e.stopPropagation());
       input.addEventListener("input", () => updateFieldFromControl(field, input));
@@ -1289,6 +1651,7 @@ function updateFieldFromControl(field, input){
     const leaderInput = Array.from(document.querySelectorAll('#textForm input')).find((el, idx) => template.textFields[idx]?.key === field.key);
     if(leaderInput) leaderInput.value = input.value;
   }
+  syncActiveVariantLayout();
   render();
 }
 
@@ -1297,14 +1660,30 @@ function updateSlotFromInputs(){
   template.personSlot.y = Number($("slotY").value || 0);
   template.personSlot.width = Number($("slotW").value || 0);
   template.personSlot.height = Number($("slotH").value || 0);
+  syncActiveVariantLayout();
   render();
 }
 
-function render(){
+function render(force = false){
+  if(force){
+    if(renderFrame){
+      cancelAnimationFrame(renderFrame);
+      renderFrame = 0;
+    }
+    drawPoster();
+    return;
+  }
+  if(renderFrame) return;
+  renderFrame = requestAnimationFrame(() => {
+    renderFrame = 0;
+    drawPoster();
+  });
+}
+
+function drawPoster(){
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if(bgImg) drawCover(bgImg, 0, 0, canvas.width, canvas.height);
   else fillPlaceholder("Chưa có background");
-  drawPageTint();
 
   if(personImg){
     const drawable = getProcessedPersonDrawable();
@@ -1319,42 +1698,22 @@ function render(){
     ctx.restore();
   }
 
-  if(fgImg) drawCover(fgImg, 0, 0, canvas.width, canvas.height);
+  if(fgImg){
+    const foreground = getActiveForegroundTransform();
+    ctx.drawImage(fgImg, foreground.x, foreground.y, foreground.width, foreground.height);
+  }
   drawDynamicText();
-  if(inlineEditingKey && !exportCleanMode) drawInlineTextGuide();
-  if(activeTab === "admin" && showTextGuides) drawTextGuides();
-  if(activeTab === "admin" && showSlot) drawPersonSlotGuide();
+  if(activeTab === "leader" && leaderGuidesVisible && !exportCleanMode) drawLeaderTextGuides();
+  if(activeTab === "admin" && showTextGuides && !editForegroundMode) drawTextGuides();
+  if(activeTab === "admin" && showSlot && !editForegroundMode) drawPersonSlotGuide();
+  if(activeTab === "admin" && editForegroundMode && fgImg && !exportCleanMode) drawForegroundTransformGuide();
   if(personImg && activeTab === "leader" && leaderGuidesVisible && !exportCleanMode) drawPersonTransformGuide();
   if(snapState.active && !exportCleanMode) drawCenterSnapFeedback();
+  positionInlineTextEditor();
 }
 
 function drawCover(img, x, y, w, h){
   ctx.drawImage(img, x, y, w, h);
-}
-
-function drawPageTint(){
-  const page = template.page || {};
-  const opacity = Number(page.tintOpacity || 0);
-  if(!page.tintEnabled || opacity <= 0) return;
-  ctx.save();
-  ctx.globalAlpha = clamp(opacity, 0, 0.75);
-  ctx.globalCompositeOperation = "color";
-  ctx.fillStyle = page.tintColor || currentPage.tint;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.restore();
-}
-
-function drawInlineTextGuide(){
-  const box = textRenderBoxes.get(inlineEditingKey);
-  if(!box) return;
-  ctx.save();
-  ctx.setLineDash([10, 7]);
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = currentPage.accent;
-  ctx.fillStyle = "rgba(0,0,0,.16)";
-  ctx.fillRect(box.x, box.y, box.width, box.height);
-  ctx.strokeRect(box.x, box.y, box.width, box.height);
-  ctx.restore();
 }
 
 function fillPlaceholder(text){
@@ -1368,7 +1727,7 @@ function fillPlaceholder(text){
 
 function drawDynamicText(){
   textRenderBoxes.clear();
-  template.textFields.forEach(field => {
+  getDrawableTextFields().forEach(field => {
     let value = textValues[field.key] ?? field.defaultValue ?? "";
     if(field.uppercase) value = String(value).toUpperCase();
     if(!value) return;
@@ -1445,6 +1804,7 @@ function drawTextWithLetterSpacing(text, x, y, letterSpacing, align){
 
 function drawTextGuides(){
   textRenderBoxes.forEach((box, key) => {
+    if(isLeaderTempTextKey(key)) return;
     const isSelected = key === selectedTextKey;
     ctx.save();
     ctx.setLineDash(isSelected ? [] : [8, 8]);
@@ -1460,6 +1820,60 @@ function drawTextGuides(){
     ctx.fillText(key, box.x + 8, box.y + 7);
     ctx.restore();
   });
+}
+
+function drawLeaderTextGuides(){
+  textRenderBoxes.forEach((box, key) => {
+    const isEditing = key === inlineEditorKey;
+    const isSelected = key === selectedTextKey;
+    const isTemp = isLeaderTempTextKey(key);
+    const isOverride = leaderTextOverrides.has(key);
+    ctx.save();
+    ctx.setLineDash(isSelected ? [] : [7, 9]);
+    ctx.lineWidth = isEditing || isSelected ? 3 : 2;
+    ctx.strokeStyle = isTemp
+      ? (isEditing || isSelected ? "rgba(126,176,255,.98)" : "rgba(126,176,255,.62)")
+      : (isOverride ? "rgba(66,216,139,.88)" : (isEditing || isSelected ? "rgba(255,231,163,.95)" : "rgba(255,231,163,.36)"));
+    ctx.fillStyle = isTemp
+      ? "rgba(126,176,255,.09)"
+      : (isOverride ? "rgba(66,216,139,.08)" : (isEditing || isSelected ? "rgba(233,189,85,.12)" : "rgba(233,189,85,.035)"));
+    ctx.fillRect(box.x, box.y, box.width, box.height);
+    ctx.strokeRect(box.x, box.y, box.width, box.height);
+    if(isTemp || isOverride){
+      ctx.fillStyle = isTemp ? "#dcebff" : "#c9ffe1";
+      ctx.font = "800 16px Inter, Arial, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(isTemp ? "TẠM" : "TÙY CHỈNH", box.x + 8, box.y + 6);
+    }
+    ctx.restore();
+  });
+}
+
+function drawForegroundTransformGuide(){
+  const transform = getActiveForegroundTransform();
+  ctx.save();
+  ctx.setLineDash([12, 8]);
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = "rgba(255,115,115,.98)";
+  ctx.fillStyle = "rgba(255,115,115,.06)";
+  ctx.fillRect(transform.x, transform.y, transform.width, transform.height);
+  ctx.strokeRect(transform.x, transform.y, transform.width, transform.height);
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(255,115,115,.98)";
+  ctx.fillRect(transform.x + transform.width - FOREGROUND_HANDLE_SIZE, transform.y + transform.height - FOREGROUND_HANDLE_SIZE, FOREGROUND_HANDLE_SIZE, FOREGROUND_HANDLE_SIZE);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(transform.x + transform.width - FOREGROUND_HANDLE_SIZE, transform.y + transform.height - FOREGROUND_HANDLE_SIZE, FOREGROUND_HANDLE_SIZE, FOREGROUND_HANDLE_SIZE);
+  ctx.fillStyle = "rgba(5,6,10,.78)";
+  roundRect(ctx, clamp(transform.x + 12, 8, canvas.width - 220), clamp(transform.y + 12, 8, canvas.height - 48), 205, 36, 16);
+  ctx.fill();
+  ctx.fillStyle = "#ffd7d7";
+  ctx.font = "800 17px Inter, Arial, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText("BẢN TRÊN · ADMIN", clamp(transform.x + 26, 22, canvas.width - 205), clamp(transform.y + 30, 26, canvas.height - 28));
+  ctx.restore();
 }
 
 function drawPersonSlotGuide(){
@@ -1730,8 +2144,10 @@ async function downscaleImageIfNeeded(img, maxEdge = MAX_PERSON_EDGE){
   cx.imageSmoothingEnabled = true;
   cx.imageSmoothingQuality = "high";
   cx.drawImage(img, 0, 0, c.width, c.height);
-  const url = c.toDataURL("image/png", .96);
-  return srcToImage(url);
+  const blob = await new Promise(resolve => c.toBlob(resolve, "image/png", .94));
+  if(!blob) return img;
+  const url = URL.createObjectURL(blob);
+  return srcToImage(url, { cache:false });
 }
 
 async function compressFileForRemoval(file){
@@ -1799,101 +2215,6 @@ function mobileQuickFit(){
   showMobileToast("Đã canh nhanh cho màn điện thoại");
 }
 
-async function removeBackgroundSmart(){
-  if(!personSourceFile){ alert("Upload ảnh nhân sự trước nha."); return; }
-  const cacheKey = `${personSourceFile.name}:${personSourceFile.size}:${personSourceFile.lastModified}`;
-  const cached = processedImageCache.get(cacheKey);
-  if(cached){
-    personImg = cached.image;
-    person.bounds = cached.bounds;
-    person.x = cached.transform.x;
-    person.y = cached.transform.y;
-    person.scale = cached.transform.scale;
-    syncPersonControls();
-    invalidatePersonCache();
-    render();
-    showMobileToast("Đã dùng kết quả tách nền đã lưu tạm");
-    return;
-  }
-
-  const btn = $("btnRemoveBg");
-  const quickBtn = $("btnQuickRemoveBg");
-  const old = btn?.textContent || "Xóa nền AI";
-  if(btn){ btn.textContent = "Đang tách nền..."; btn.disabled = true; }
-  if(quickBtn) quickBtn.disabled = true;
-  updateRemoveBgProgress({ visible:true, percent:5, title:"Chuẩn bị ảnh", hint:"Đang nén ảnh trước khi gửi AI để giảm thời gian upload và xử lý.", step:"prepare", mode:"ai" });
-
-  try{
-    const ready = await Promise.race([
-      backendWakePromise || warmBackend(),
-      new Promise(resolve => setTimeout(() => resolve(false), 12000))
-    ]);
-    if(ready) setBackendStatus("AI: đang xử lý", "warn");
-    const result = await removeBackgroundViaBackend(personSourceFile);
-    processedImageCache.set(cacheKey, result);
-    personImg = result.image;
-    person.bounds = result.bounds;
-    person.x = result.transform.x;
-    person.y = result.transform.y;
-    person.scale = result.transform.scale;
-    syncPersonControls();
-    invalidatePersonCache();
-    updateRemoveBgProgress({ visible:true, percent:100, title:"AI hoàn tất", hint:"Đã tách nền và tự căn avatar trong một lần xử lý.", step:"done", mode:"ai" });
-    setRemoveBgStatus("Đã tách nền bằng backend và tự căn avatar.");
-    setBackendStatus("AI: sẵn sàng", "good");
-    showMobileToast("Tách nền xong • Đã tự căn avatar");
-    render();
-  }catch(err){
-    console.warn("Backend remove background failed, falling back to browser", err);
-    setBackendStatus("AI: fallback trên máy", "warn");
-    setRemoveBgStatus(`Backend chưa xử lý được (${err.message || "lỗi"}). Đang chuyển sang AI/fallback trên máy...`);
-    await removeBackgroundInBrowser();
-  }finally{
-    if(btn){ btn.textContent = old; btn.disabled = false; }
-    if(quickBtn) quickBtn.disabled = false;
-  }
-}
-
-async function removeBackgroundViaBackend(file){
-  updateRemoveBgProgress({ visible:true, percent:16, title:"Gửi ảnh đến AI", hint:"Ảnh đã được tối ưu kích thước trước khi gửi.", step:"download", mode:"ai" });
-  const optimizedFile = await compressFileForRemoval(file);
-  const form = new FormData();
-  form.append("file", optimizedFile, optimizedFile.name || "person.jpg");
-  form.append("slot_x", String(template.personSlot.x));
-  form.append("slot_y", String(template.personSlot.y));
-  form.append("slot_width", String(template.personSlot.width));
-  form.append("slot_height", String(template.personSlot.height));
-  form.append("anchor_y", "bottom");
-  form.append("fit_mode", "head_to_belly");
-  form.append("save_removed_bg", "false");
-  form.append("return_base64", "true");
-  form.append("folder", `processed/autofit/${currentPageSlug}`);
-
-  updateRemoveBgProgress({ visible:true, percent:35, title:"AI đang nhận diện người", hint:"Backend đang tách nền và tính vị trí đầu–thân phù hợp với poster.", step:"segment", mode:"ai" });
-  const response = await fetchWithTimeout(`${BACKEND_URL}/api/auto-fit-person`, { method:"POST", body:form }, BACKEND_TIMEOUT_MS);
-  const data = await response.json().catch(() => ({}));
-  if(!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
-
-  let source = null;
-  if(data.base64) source = `data:image/png;base64,${data.base64}`;
-  if(!source) source = data.storage?.public_url || data.storage?.publicUrl;
-  if(!source) throw new Error("Backend chưa trả ảnh PNG đã tách nền");
-
-  updateRemoveBgProgress({ visible:true, percent:84, title:"Đang đưa ảnh vào poster", hint:"Đang tải ảnh trong suốt và áp dụng vị trí tự căn.", step:"segment", mode:"ai" });
-  const image = await loadCachedDrawable(source, { bypassCache:source.startsWith("data:") });
-  const bounds = getAlphaBounds(image);
-  const transform = data.transform || {};
-  return {
-    image,
-    bounds,
-    transform:{
-      x:Number.isFinite(Number(transform.x)) ? Number(transform.x) : template.personSlot.x,
-      y:Number.isFinite(Number(transform.y)) ? Number(transform.y) : template.personSlot.y,
-      scale:Number.isFinite(Number(transform.scale)) ? Number(transform.scale) : 1
-    }
-  };
-}
-
 async function removeBackgroundInBrowser(){
   if(!personSourceFile){ alert("Upload ảnh nhân sự trước nha."); return; }
   const btn = $("btnRemoveBg");
@@ -1903,10 +2224,11 @@ async function removeBackgroundInBrowser(){
   updateRemoveBgProgress({ visible:true, percent:6, title:"Chuẩn bị ảnh", hint:"Đang tối ưu ảnh để điện thoại xử lý nhẹ và mượt hơn.", step:"prepare", mode:"ai" });
   setRemoveBgStatus("Đang chuẩn bị ảnh nhẹ hơn để iPhone xử lý mượt...");
   try{
+    preloadRemoveBgModule();
     const mobileFile = await compressFileForRemoval(personSourceFile);
     updateRemoveBgProgress({ visible:true, percent:18, title:"Tải mô hình AI", hint:"Lần đầu có thể mất 10–30 giây tùy mạng. Những lần sau sẽ nhanh hơn.", step:"download", mode:"ai" });
     setRemoveBgStatus("Đang tải AI xóa nền trong trình duyệt...");
-    const mod = await import("https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm");
+    const mod = await getRemoveBgModule();
     let reachedInference = false;
     const blob = await mod.removeBackground(mobileFile, {
       progress: (key, current, total) => {
@@ -2087,30 +2409,60 @@ function pointerDown(e){
   activePointers.set(e.pointerId, p);
 
   if(activePointers.size === 2 && personImg && activeTab === "leader"){
-    tapCandidate = null;
+    closeInlineTextEditor();
     startPinchGesture();
     showMobileToast("Đang zoom avatar bằng 2 ngón");
     return;
   }
 
-  const textHit = hitTextBox(p.x, p.y);
-  if(inlineEditingKey && (!textHit || textHit.key !== inlineEditingKey)) closeInlineTextEditor(true);
-  if(textHit){
-    selectedTextKey = textHit.key;
-    tapCandidate = { pointerId:e.pointerId, key:textHit.key, x:p.x, y:p.y, startedAt:performance.now(), moved:false };
-    if(activeTab === "admin"){
-      const field = template.textFields.find(f => f.key === textHit.key);
+  if(activeTab === "leader"){
+    const textHit = hitTextBox(p.x, p.y);
+    if(textHit){
+      selectedTextKey = textHit.key;
+      syncLeaderTextStylePanel();
+      const sourceField = findTextFieldByKey(textHit.key);
+      if(sourceField?.draggable !== false){
+        closeInlineTextEditor();
+        const field = ensureLeaderTextOverride(textHit.key);
+        if(field) leaderTextPress = { key:textHit.key, x:p.x, y:p.y, fieldX:field.x, fieldY:field.y, moved:false };
+      } else {
+        openInlineTextEditor(textHit.key);
+      }
+      render();
+      return;
+    }
+    closeInlineTextEditor();
+  }
+
+  if(activeTab === "admin"){
+    closeInlineTextEditor();
+    if(editForegroundMode && fgImg){
+      const foregroundHit = hitForegroundTransform(p.x, p.y);
+      const transform = getActiveForegroundTransform();
+      if(foregroundHit === "resize"){
+        resizingForeground = true;
+        dragStart = { ...dragStart, x:p.x, y:p.y, fgX:transform.x, fgY:transform.y, fgW:transform.width, fgH:transform.height };
+        return;
+      }
+      if(foregroundHit === "body"){
+        draggingForeground = true;
+        dragStart = { ...dragStart, x:p.x, y:p.y, fgX:transform.x, fgY:transform.y, fgW:transform.width, fgH:transform.height };
+        return;
+      }
+    }
+    const hit = hitTextBox(p.x, p.y, { includeTemp:false });
+    if(hit){
+      selectedTextKey = hit.key;
+      const field = template.textFields.find(f => f.key === hit.key);
       if(field?.draggable !== false){
         draggingText = true;
         dragStart = { x:p.x, y:p.y, fieldX:field.x, fieldY:field.y };
       }
       syncAdminTextCards();
+      render();
+      return;
     }
-    render();
-    return;
-  }
 
-  if(activeTab === "admin"){
     const slotHit = hitPersonSlot(p.x, p.y);
     if(slotHit === "resize"){
       resizingSlot = true;
@@ -2136,13 +2488,33 @@ function pointerMove(e){
   const p = canvasPoint(e);
   if(activePointers.has(e.pointerId)) activePointers.set(e.pointerId, p);
 
-  if(tapCandidate && tapCandidate.pointerId === e.pointerId){
-    if(Math.hypot(p.x - tapCandidate.x, p.y - tapCandidate.y) > 9) tapCandidate.moved = true;
-  }
-
   if(pinchState && activePointers.size >= 2){
     updatePinchGesture();
     return;
+  }
+
+  if(leaderTextPress && activeTab === "leader"){
+    const field = findTextFieldByKey(leaderTextPress.key);
+    if(!field) return;
+    const dx = p.x - leaderTextPress.x;
+    const dy = p.y - leaderTextPress.y;
+    if(!leaderTextPress.moved && Math.hypot(dx, dy) > 8){
+      leaderTextPress.moved = true;
+      draggingLeaderText = true;
+      showMobileToast("Đang kéo chữ · chỉ áp dụng trong phiên này");
+    }
+    if(leaderTextPress.moved){
+      const rawX = Math.round(leaderTextPress.fieldX + dx);
+      const rawY = Math.round(leaderTextPress.fieldY + dy);
+      const snap = applyTextSnap(field, rawX);
+      field.x = snap.x;
+      field.y = rawY;
+      snapState.active = snap.snapped;
+      snapState.targetX = canvas.width / 2;
+      syncLeaderTextStylePanel();
+      render();
+      return;
+    }
   }
 
   if(draggingText){
@@ -2156,6 +2528,25 @@ function pointerMove(e){
     snapState.active = snap.snapped;
     snapState.targetX = canvas.width / 2;
     updateAdminCardValues(field);
+    syncActiveVariantLayout();
+    render();
+    return;
+  }
+
+  if(draggingForeground){
+    const transform = getActiveForegroundTransform();
+    transform.x = Math.round(dragStart.fgX + (p.x - dragStart.x));
+    transform.y = Math.round(dragStart.fgY + (p.y - dragStart.y));
+    syncForegroundTransformInputs();
+    render();
+    return;
+  }
+
+  if(resizingForeground){
+    const transform = getActiveForegroundTransform();
+    transform.width = Math.max(80, Math.round(dragStart.fgW + (p.x - dragStart.x)));
+    transform.height = Math.max(80, Math.round(dragStart.fgH + (p.y - dragStart.y)));
+    syncForegroundTransformInputs();
     render();
     return;
   }
@@ -2164,6 +2555,7 @@ function pointerMove(e){
     template.personSlot.x = Math.round(dragStart.slotX + (p.x - dragStart.x));
     template.personSlot.y = Math.round(dragStart.slotY + (p.y - dragStart.y));
     syncSlotInputs();
+    syncActiveVariantLayout();
     render();
     return;
   }
@@ -2172,6 +2564,7 @@ function pointerMove(e){
     template.personSlot.width = Math.max(120, Math.round(dragStart.slotW + (p.x - dragStart.x)));
     template.personSlot.height = Math.max(120, Math.round(dragStart.slotH + (p.y - dragStart.y)));
     syncSlotInputs();
+    syncActiveVariantLayout();
     render();
     return;
   }
@@ -2187,7 +2580,6 @@ function pointerMove(e){
 }
 
 function pointerUp(e){
-  const candidate = tapCandidate && e?.pointerId === tapCandidate.pointerId ? tapCandidate : null;
   if(e?.pointerId !== undefined){
     activePointers.delete(e.pointerId);
     try { canvas.releasePointerCapture(e.pointerId); } catch(err) {}
@@ -2197,18 +2589,22 @@ function pointerUp(e){
     syncPersonControls();
   }
   if(activePointers.size === 0){
-    const wasDragging = draggingPerson || draggingText || draggingSlot || resizingSlot;
+    const pendingLeaderPress = leaderTextPress;
+    const wasDragging = draggingPerson || draggingText || draggingLeaderText || draggingSlot || resizingSlot || draggingForeground || resizingForeground;
     draggingPerson = false;
     draggingText = false;
+    draggingLeaderText = false;
     draggingSlot = false;
     resizingSlot = false;
+    draggingForeground = false;
+    resizingForeground = false;
+    leaderTextPress = null;
     if(snapState.active) snapState.active = false;
+    if(pendingLeaderPress && !pendingLeaderPress.moved){
+      openInlineTextEditor(pendingLeaderPress.key);
+    }
     if(wasDragging) render();
   }
-  if(candidate && !candidate.moved && performance.now() - candidate.startedAt < 750){
-    requestAnimationFrame(() => openInlineTextEditor(candidate.key));
-  }
-  if(candidate) tapCandidate = null;
 }
 
 function pointerLeave(e){
@@ -2266,8 +2662,21 @@ function applyTextSnap(field, rawX){
 }
 
 function updateCanvasCursor(p){
+  if(activeTab === "leader"){
+    const leaderHit = hitTextBox(p.x, p.y);
+    if(leaderHit){
+      const field = findTextFieldByKey(leaderHit.key);
+      canvas.style.cursor = field?.draggable === false ? "text" : "grab";
+      return;
+    }
+  }
   if(activeTab === "admin"){
-    const textHit = hitTextBox(p.x, p.y);
+    if(editForegroundMode && fgImg){
+      const foregroundHit = hitForegroundTransform(p.x, p.y);
+      if(foregroundHit === "resize"){ canvas.style.cursor = "nwse-resize"; return; }
+      if(foregroundHit === "body"){ canvas.style.cursor = "move"; return; }
+    }
+    const textHit = hitTextBox(p.x, p.y, { includeTemp:false });
     if(textHit){ canvas.style.cursor = "grab"; return; }
     const slotHit = hitPersonSlot(p.x, p.y);
     if(slotHit === "resize") { canvas.style.cursor = "nwse-resize"; return; }
@@ -2280,13 +2689,23 @@ function updateCanvasCursor(p){
   canvas.style.cursor = "default";
 }
 
-function hitTextBox(x, y){
-  const fields = [...template.textFields].reverse();
+function hitTextBox(x, y, { includeTemp = true } = {}){
+  const sourceFields = includeTemp ? getDrawableTextFields() : template.textFields;
+  const fields = [...sourceFields].reverse();
   for(const f of fields){
     const box = textRenderBoxes.get(f.key);
     if(!box) continue;
     if(x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height){ return box; }
   }
+  return null;
+}
+
+function hitForegroundTransform(x, y){
+  const transform = getActiveForegroundTransform();
+  const hx = transform.x + transform.width - FOREGROUND_HANDLE_SIZE;
+  const hy = transform.y + transform.height - FOREGROUND_HANDLE_SIZE;
+  if(x >= hx && x <= hx + FOREGROUND_HANDLE_SIZE && y >= hy && y <= hy + FOREGROUND_HANDLE_SIZE) return "resize";
+  if(x >= transform.x && x <= transform.x + transform.width && y >= transform.y && y <= transform.y + transform.height) return "body";
   return null;
 }
 
@@ -2304,10 +2723,89 @@ function updateAdminCardValues(field){
   if(!card) return;
   const x = card.querySelector('input[data-field="x"]');
   const y = card.querySelector('input[data-field="y"]');
-  const size = card.querySelector('input[data-field="fontSize"]');
   if(x) x.value = field.x;
   if(y) y.value = field.y;
-  if(size) size.value = field.fontSize;
+}
+
+function openInlineTextEditor(key){
+  const field = findTextFieldByKey(key);
+  const box = textRenderBoxes.get(key);
+  const editor = $("canvasTextEditor");
+  if(!field || !box || !editor) return;
+  inlineEditorKey = key;
+  inlineEditorBeforeValue = textValues[key] ?? field.defaultValue ?? "";
+  editor.value = inlineEditorBeforeValue;
+  editor.hidden = false;
+  editor.dataset.key = key;
+  positionInlineTextEditor();
+  requestAnimationFrame(() => {
+    editor.focus({ preventScroll:true });
+    editor.select();
+  });
+  render();
+}
+
+function positionInlineTextEditor(){
+  const editor = $("canvasTextEditor");
+  if(!editor || !inlineEditorKey || editor.hidden || exportCleanMode) return;
+  const box = textRenderBoxes.get(inlineEditorKey);
+  const field = findTextFieldByKey(inlineEditorKey);
+  if(!box || !field) return;
+  const scaleX = canvas.clientWidth / canvas.width;
+  const scaleY = canvas.clientHeight / canvas.height;
+  const rawLeft = canvas.offsetLeft + box.x * scaleX;
+  const rawTop = canvas.offsetTop + box.y * scaleY;
+  const shellWidth = canvas.parentElement?.clientWidth || canvas.clientWidth;
+  const width = Math.min(Math.max(90, box.width * scaleX), Math.max(90, shellWidth - 16));
+  const height = Math.max(34, box.height * scaleY);
+  const left = clamp(rawLeft, 8, Math.max(8, shellWidth - width - 8));
+  const top = Math.max(8, rawTop);
+  editor.style.left = `${left}px`;
+  editor.style.top = `${top}px`;
+  editor.style.width = `${width}px`;
+  editor.style.minHeight = `${height}px`;
+  editor.style.fontFamily = field.fontFamily || "Inter, Arial, sans-serif";
+  editor.style.fontSize = `${clamp((field.fontSize || 36) * scaleY, 13, 46)}px`;
+  editor.style.fontWeight = field.fontWeight || "800";
+  editor.style.textAlign = field.align || "center";
+}
+
+function onInlineTextInput(e){
+  if(!inlineEditorKey) return;
+  textValues[inlineEditorKey] = e.target.value;
+  syncLeaderTextInput(inlineEditorKey, e.target.value);
+  render();
+}
+
+function onInlineTextKeyDown(e){
+  if(e.key === "Enter" && !e.shiftKey){
+    e.preventDefault();
+    closeInlineTextEditor();
+  }
+  if(e.key === "Escape"){
+    e.preventDefault();
+    closeInlineTextEditor({ revert:true });
+  }
+}
+
+function closeInlineTextEditor({ revert = false } = {}){
+  const editor = $("canvasTextEditor");
+  if(!editor || !inlineEditorKey) return;
+  const key = inlineEditorKey;
+  if(revert){
+    textValues[key] = inlineEditorBeforeValue;
+    syncLeaderTextInput(key, inlineEditorBeforeValue);
+  }
+  inlineEditorKey = null;
+  inlineEditorBeforeValue = "";
+  editor.hidden = true;
+  editor.blur();
+  render();
+}
+
+function syncLeaderTextInput(key, value){
+  const input = document.querySelector(`#textForm input[data-key="${CSS.escape(key)}"]`);
+  if(input && input.value !== value) input.value = value;
 }
 
 function canvasPoint(e){
@@ -2356,14 +2854,14 @@ function makePosterBlob(){
   showTextGuides = false;
   snapState.active = false;
   exportCleanMode = true;
-  render();
+  render(true);
   return new Promise((resolve, reject) => {
     canvas.toBlob(blob => {
       showSlot = originalShowSlot;
       showTextGuides = originalShowTextGuides;
       snapState.active = originalSnap;
       exportCleanMode = originalExportCleanMode;
-      render();
+      render(true);
       if(blob) resolve(blob);
       else reject(new Error("Không tạo được PNG blob"));
     }, "image/png", 1);
@@ -2418,68 +2916,111 @@ function fileToDataURL(file){
 }
 
 async function fileToImage(file){
-  const url = await fileToDataURL(file);
-  return srcToImage(url);
-}
-
-async function loadCachedDrawable(src, { bypassCache = false } = {}){
-  if(!src) return null;
-  if(src.startsWith("data:") || src.startsWith("blob:")) return srcToImage(src);
-  const absolute = new URL(src, location.href).href;
-  if(drawableCache.has(absolute)) return drawableCache.get(absolute);
-  const promise = (async () => {
-    try{
-      let response = null;
-      if(!bypassCache && "caches" in window){
-        const cache = await caches.open("unite-poster-assets-v7");
-        response = await cache.match(absolute);
-        if(!response){
-          response = await fetch(absolute, { mode:"cors", cache:"force-cache" });
-          if(response.ok) await cache.put(absolute, response.clone());
-        }
-      }else{
-        response = await fetch(absolute, { mode:"cors", cache:"force-cache" });
-      }
-      if(!response?.ok) throw new Error(`Không tải được asset ${response?.status || ""}`);
-      const blob = await response.blob();
-      if("createImageBitmap" in window){
-        return await createImageBitmap(blob, { premultiplyAlpha:"premultiply", colorSpaceConversion:"default" });
-      }
-      return await srcToImage(URL.createObjectURL(blob));
-    }catch(err){
-      console.warn("Cache image fallback", absolute, err);
-      return await srcToImage(absolute);
-    }
-  })();
-  drawableCache.set(absolute, promise);
-  try{
-    const drawable = await promise;
-    drawableCache.set(absolute, drawable);
-    return drawable;
-  }catch(err){
-    drawableCache.delete(absolute);
-    throw err;
+  const url = URL.createObjectURL(file);
+  try {
+    return await srcToImage(url, { cache:false });
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 }
 
-function srcToImage(src){
-  return new Promise((resolve, reject) => {
+function srcToImage(src, { cache = true, priority = "auto" } = {}){
+  const canCache = cache && isCacheableImageSource(src);
+  if(canCache && imageCache.has(src)) return imageCache.get(src);
+  const promise = new Promise((resolve, reject) => {
     const img = new Image();
     img.decoding = "async";
-    img.onload = () => resolve(img);
+    img.fetchPriority = priority;
+    img.onload = () => {
+      if(img.decode) img.decode().catch(() => {}).finally(() => resolve(img));
+      else resolve(img);
+    };
     img.onerror = reject;
     img.crossOrigin = "anonymous";
     img.src = src;
   });
+  if(canCache) imageCache.set(src, promise);
+  return promise;
 }
 
 function waitImage(img){ return img.complete ? Promise.resolve() : new Promise(res => img.onload = res); }
+function isCacheableImageSource(src){ return typeof src === "string" && !src.startsWith("data:") && !src.startsWith("blob:"); }
+function scheduleIdleTask(fn, timeout = 800){
+  if("requestIdleCallback" in window) window.requestIdleCallback(fn, { timeout });
+  else setTimeout(fn, Math.min(timeout, 1000));
+}
+function preloadBackgroundVariants(){
+  getBackgroundVariants()
+    .map(item => item.src)
+    .filter(Boolean)
+    .filter(src => src !== getActiveBackgroundSrc())
+    .forEach(src => srcToImage(src, { priority:"low" }).catch(() => {}));
+}
+function preloadForegroundVariants(){
+  getForegroundVariants()
+    .map(item => item.src)
+    .filter(Boolean)
+    .filter(src => src !== getActiveForegroundSrc())
+    .forEach(src => srcToImage(src, { priority:"low" }).catch(() => {}));
+}
+function preloadRemoveBgModule(){
+  getRemoveBgModule().catch(() => {});
+}
+function getRemoveBgModule(){
+  if(!removeBgModulePromise){
+    removeBgModulePromise = import(REMOVE_BG_MODULE_URL).catch(err => {
+      removeBgModulePromise = null;
+      throw err;
+    });
+  }
+  return removeBgModulePromise;
+}
+function getRouteOptions(){
+  const params = new URLSearchParams(window.location.search);
+  const routeBg = normalizeBackgroundId(params.get("page") || params.get("bg") || params.get("background") || params.get("color") || "");
+  return {
+    templateSlug: normalizeBackgroundId(params.get("template") || params.get("slug") || ""),
+    backgroundId: resolveBackgroundAlias(routeBg)
+  };
+}
+function resolveBackgroundAlias(id){
+  const aliases = {
+    "gold": "tinhhoa",
+    "black-gold": "kitai",
+    "blue": "tienphong",
+    "red": "khaipha",
+    "green": "bucpha"
+  };
+  return aliases[id] || id;
+}
+function normalizeBackgroundId(input){
+  return String(input || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "")
+    .slice(0, 48);
+}
 function clamp(n,min,max){ return Math.max(min, Math.min(max, n)); }
 function clampByte(n){ return Math.max(0, Math.min(255, Math.round(n))); }
 function toHex(color){ return /^#/.test(color) ? color : '#ffffff'; }
 function isSelected(current, value){ return String(current || "") === String(value) ? "selected" : ""; }
 function escapeHtml(str){ return String(str).replace(/[&<>"']/g, s => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[s])); }
 function escapeAttr(str){ return escapeHtml(str); }
+function describeTemplatePersistence(sourceTemplate){
+  const textCount = Array.isArray(sourceTemplate?.textFields) ? sourceTemplate.textFields.length : 0;
+  const bgCount = Array.isArray(sourceTemplate?.backgroundVariants) ? sourceTemplate.backgroundVariants.length : 0;
+  const fgCount = Array.isArray(sourceTemplate?.foregroundVariants) ? sourceTemplate.foregroundVariants.length : 0;
+  const fontCount = Array.isArray(sourceTemplate?.fonts) ? sourceTemplate.fonts.length : 0;
+  const transformedForegrounds = (sourceTemplate?.foregroundVariants || []).filter(item => item?.transform).length;
+  return `<span>Đã xác nhận response DB: ${textCount} vùng chữ · ${bgCount} nền · ${fgCount} bản trên (${transformedForegrounds} transform) · ${fontCount} font.</span>`;
+}
+function stripHtml(value){
+  const div = document.createElement("div");
+  div.innerHTML = String(value || "");
+  return div.textContent || div.innerText || "";
+}
 function formatDate(v){ return v ? new Date(v).toLocaleString('vi-VN') : '-'; }
 function roundRect(cx, x, y, w, h, r){
   const radius = Math.min(r, w/2, h/2);

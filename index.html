@@ -3,28 +3,22 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Unite Poster Studio Pro v7</title>
+  <title>Unite Poster Studio Pro v6.2.0</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preload" as="image" href="assets/unite-bg-clean.png" fetchpriority="high">
+  <link rel="preload" as="image" href="assets/unite-foreground.png">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Montserrat:wght@600;700;800;900&family=Playfair+Display:wght@600;700;800&display=swap" rel="stylesheet">
-  <link rel="preload" href="assets/unite-bg-clean.png" as="image" fetchpriority="high" />
-  <link rel="preload" href="assets/unite-foreground.png" as="image" />
-  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="stylesheet" href="css/styles.css?v=20260617-v620" />
 </head>
 <body>
   <header class="app-header">
     <div class="brand-block">
       <img id="brandAdminTrigger" class="brand-logo" src="assets/unite-group-logo.png" alt="Unite Group" title="Nhấn để chuyển Admin/Poster" role="button" tabindex="0" />
       <div>
-        <h1>Unite Poster Studio <span class="version-badge">V7</span></h1>
-        <p>5 trang màu riêng · sửa chữ trực tiếp trên poster · AI backend ưu tiên.</p>
+        <h1>Unite Poster Studio</h1>
+        <p>Giao diện tối giản, tối ưu thao tác nhanh trên điện thoại và iPhone.</p>
       </div>
-    </div>
-
-    <div class="page-switcher-wrap">
-      <span class="page-switcher-label">Trang đang mở</span>
-      <select id="pageSwitcher" class="page-switcher" aria-label="Chọn trang poster"></select>
-      <a id="copyPageLink" class="header-link-btn" href="#" role="button">Copy link</a>
     </div>
 
   </header>
@@ -38,41 +32,17 @@
         </div>
         <div class="stage-head-actions compact-preview-actions">
           <button id="btnToggleGuides" type="button" class="soft mini stage-guide-btn active">Khung: Bật</button>
-          <span id="pageStatus" class="pill compact-pill page-pill">Trang: Vàng</span>
           <span id="cloudStatus" class="pill compact-pill">Cloud: đang kiểm tra...</span>
-          <span id="backendStatus" class="pill compact-pill warn">AI: đang khởi động...</span>
           <button id="btnSharePoster" class="soft mini compact-action-btn">Chia sẻ</button>
           <button id="btnExport" class="primary compact-action-btn">Xuất PNG</button>
           <span id="canvasHint" class="hint visually-hidden">Kéo avatar bằng 1 ngón, chụm 2 ngón để zoom.</span>
         </div>
       </div>
 
-      <div class="canvas-shell" id="canvasShell">
+      <div class="canvas-shell">
         <canvas id="posterCanvas"></canvas>
-        <div id="inlineTextEditor" class="inline-text-editor" hidden>
-          <div class="inline-text-editor-head">
-            <span id="inlineTextLabel">Sửa nội dung</span>
-            <button id="inlineTextClose" type="button" aria-label="Đóng">×</button>
-          </div>
-          <input id="inlineTextInput" type="text" autocomplete="off" enterkeyhint="done" />
-          <div class="inline-text-actions">
-            <button id="inlineTextSmaller" type="button" class="soft mini">A−</button>
-            <button id="inlineTextLarger" type="button" class="soft mini">A+</button>
-            <button id="inlineTextApply" type="button" class="primary mini-inline">Xong</button>
-          </div>
-        </div>
-        <div id="canvasLoading" class="canvas-loading" hidden>
-          <span class="loader-ring"></span>
-          <b id="canvasLoadingText">Đang tải nền...</b>
-        </div>
-        <div class="mobile-toast" id="mobileToast">Chạm chữ để sửa • Kéo avatar • Chụm để zoom</div>
-      </div>
-
-      <div class="mobile-quick-dock" aria-label="Thao tác nhanh">
-        <button id="btnQuickUpload" class="soft">Ảnh</button>
-        <button id="btnQuickRemoveBg" class="soft">Tách nền</button>
-        <button id="btnQuickText" class="soft">Sửa chữ</button>
-        <button id="btnQuickFit" class="soft">Tự căn</button>
+        <textarea id="canvasTextEditor" class="canvas-text-editor" rows="1" autocomplete="off" autocapitalize="characters" spellcheck="false" hidden></textarea>
+        <div class="mobile-toast" id="mobileToast">Kéo avatar • Chụm 2 ngón để zoom</div>
       </div>
 
       <div id="iosSavePanel" class="ios-save-panel" hidden>
@@ -185,22 +155,79 @@
           <button id="btnResetTone" class="soft full-btn">Reset màu ảnh</button>
         </details>
 
-        <details class="section-card mobile-card">
+        <details class="section-card mobile-card" open>
           <summary>
             <span>
               <b>04</b>
-              <strong>Nội dung chữ dự phòng</strong>
+              <strong>Nội dung chữ</strong>
             </span>
-            <em>Ưu tiên chạm trực tiếp chữ trên poster</em>
+            <em>Tên, team, danh hiệu</em>
           </summary>
-          <div class="direct-edit-note">Chạm vào tên, team, tháng hoặc tên giải ngay trên poster để sửa. Khu vực này chỉ dùng khi cần nhập bằng form.</div>
+          <div class="leader-temp-actions">
+            <button id="btnAddLeaderText" type="button" class="soft">Thêm vùng chữ tạm</button>
+            <button id="btnResetLeaderLayout" type="button" class="soft">Khôi phục vị trí</button>
+            <button id="btnClearLeaderText" type="button" class="soft danger">Xóa toàn bộ chữ tạm</button>
+          </div>
+          <p class="note">Leader có thể kéo mọi vùng chữ và thêm chữ mới trong phiên hiện tại. Các thay đổi này không ghi vào Supabase và tự mất khi tải lại trang hoặc đổi nền.</p>
+
+          <div id="leaderTextStylePanel" class="leader-text-style-panel" hidden>
+            <div class="leader-style-head">
+              <div>
+                <strong id="leaderSelectedTextName">Chữ đang chọn</strong>
+                <span id="leaderSelectedTextType">Chỉnh tạm trong phiên</span>
+              </div>
+              <button id="btnDeleteSelectedTemp" type="button" class="soft mini danger" hidden>Xóa vùng này</button>
+            </div>
+            <div class="field-grid two leader-style-grid">
+              <label>Font
+                <select id="leaderFontSelect"></select>
+              </label>
+              <label>Cỡ chữ
+                <input id="leaderFontSize" type="number" min="12" max="220" step="1" />
+              </label>
+              <label>Độ đậm
+                <select id="leaderFontWeight">
+                  <option value="400">400</option>
+                  <option value="500">500</option>
+                  <option value="600">600</option>
+                  <option value="700">700</option>
+                  <option value="800">800</option>
+                  <option value="900">900</option>
+                </select>
+              </label>
+              <label>Màu chữ
+                <input id="leaderFontColor" type="color" value="#ffffff" />
+              </label>
+              <label>Canh chữ
+                <select id="leaderTextAlign">
+                  <option value="left">Trái</option>
+                  <option value="center">Giữa</option>
+                  <option value="right">Phải</option>
+                </select>
+              </label>
+              <label>Độ rộng vùng chữ
+                <input id="leaderTextWidth" type="number" min="80" max="1229" step="10" />
+              </label>
+            </div>
+          </div>
           <div id="textForm" class="text-form"></div>
+        </details>
+
+        <details class="section-card mobile-card" open>
+          <summary>
+            <span>
+              <b>05</b>
+              <strong>Nền / link màu</strong>
+            </span>
+            <em>5 trang nhanh</em>
+          </summary>
+          <div id="backgroundSwitcher" class="background-switcher"></div>
         </details>
 
         <details class="section-card mobile-card subtle-card">
           <summary>
             <span>
-              <b>05</b>
+              <b>06</b>
               <strong>Template cloud</strong>
             </span>
             <em>Active template</em>
@@ -236,33 +263,8 @@
           <p class="note">Chỉ tài khoản có role = admin trong bảng profiles mới lưu template hoặc upload file cloud.</p>
         </details>
 
-        <details class="section-card mobile-card" open>
-          <summary><span><b>A2</b><strong>Quản lý 5 trang màu</strong></span><em>Mỗi link một template riêng</em></summary>
-          <div class="channel-admin-grid" id="channelAdminGrid"></div>
-          <div class="batch-background-grid" id="batchBackgroundGrid"></div>
-          <button id="btnBatchSaveBackgrounds" class="primary full-btn">Lưu các nền đã chọn thành Active</button>
-          <p id="batchBackgroundStatus" class="note">Có thể chọn một hoặc đủ 5 nền rồi lưu một lần.</p>
-          <div class="admin-channel-current">
-            <div>
-              <b id="adminCurrentChannelName">Trang Vàng</b>
-              <p id="adminCurrentChannelLink">/gold</p>
-            </div>
-            <button id="btnOpenCurrentPage" class="soft mini">Mở link</button>
-          </div>
-          <div class="grid2">
-            <label>Màu phủ dự phòng
-              <input id="pageTintColor" type="color" value="#d7a72f" />
-            </label>
-            <label>Cường độ màu phủ
-              <input id="pageTintOpacity" type="range" min="0" max="0.65" step="0.01" value="0" />
-            </label>
-          </div>
-          <label class="check"><input id="pageTintEnabled" type="checkbox" /> Dùng màu phủ khi chưa có nền riêng</label>
-          <p class="note">Chọn từng trang, upload background riêng và bấm Lưu Active. Năm link sẽ tự dùng đúng template của từng trang.</p>
-        </details>
-
         <details class="section-card mobile-card">
-          <summary><span><b>A3</b><strong>Cloud template</strong></span><em>Draft / Active theo trang</em></summary>
+          <summary><span><b>A2</b><strong>Cloud template</strong></span><em>Draft / Active</em></summary>
           <div class="section-head slim-head">
             <h2>Danh sách template</h2>
             <div class="row-actions">
@@ -274,7 +276,7 @@
         </details>
 
         <details class="section-card mobile-card">
-          <summary><span><b>A4</b><strong>Thông tin & file</strong></span><em>Slug tự khóa theo trang, layer, font</em></summary>
+          <summary><span><b>A3</b><strong>Thông tin & file</strong></span><em>Slug, layer, font</em></summary>
           <div class="grid2">
             <label>Template ID / slug
               <input id="templateIdInput" type="text" />
@@ -301,6 +303,12 @@
             <input id="bgUpload" type="file" accept="image/*" />
             <span>Upload background</span>
           </label>
+          <div class="background-admin-wrap">
+            <div class="section-head slim-head">
+              <h2>5 nền / 5 link</h2>
+            </div>
+            <div id="backgroundVariantAdmin" class="background-variant-admin"></div>
+          </div>
           <label class="filebox small">
             <input id="fgUpload" type="file" accept="image/*" />
             <span>Upload foreground / bảng tên PNG</span>
@@ -318,7 +326,8 @@
         </details>
 
         <details class="section-card mobile-card">
-          <summary><span><b>A5</b><strong>Vùng avatar</strong></span><em>Person slot</em></summary>
+          <summary><span><b>A4</b><strong>Khung & bản trên</strong></span><em>Person slot / Foreground</em></summary>
+          <div class="section-head slim-head"><h2>Vùng avatar</h2></div>
           <div class="grid4">
             <label>X <input id="slotX" type="number" /></label>
             <label>Y <input id="slotY" type="number" /></label>
@@ -327,10 +336,31 @@
           </div>
           <label class="check"><input id="showSlot" type="checkbox" checked /> Hiện khung vùng người</label>
           <label class="check"><input id="showTextGuides" type="checkbox" checked /> Hiện khung chữ để kéo thả</label>
+
+          <div class="divider"></div>
+          <div class="section-head slim-head">
+            <h2>Ảnh bản trên của màu đang chọn</h2>
+            <label class="check foreground-edit-check"><input id="editForegroundMode" type="checkbox" /> Bật kéo bản trên</label>
+          </div>
+          <div class="grid4">
+            <label>X <input id="fgX" type="number" /></label>
+            <label>Y <input id="fgY" type="number" /></label>
+            <label>W <input id="fgW" type="number" min="80" /></label>
+            <label>H <input id="fgH" type="number" min="80" /></label>
+          </div>
+          <div class="row two">
+            <button id="btnResetForegroundTransform" type="button" class="soft">Phủ toàn poster</button>
+            <button id="btnFitForegroundOriginal" type="button" class="soft">Đúng tỷ lệ ảnh</button>
+          </div>
+          <p class="note">Chỉ Admin chỉnh được vị trí/kích thước bản trên. Khi Lưu Active, thông số này được lưu riêng cho từng màu trong template_json.</p>
         </details>
 
         <details class="section-card mobile-card">
-          <summary><span><b>A6</b><strong>Style chữ nâng cao</strong></span><em>Chạm chữ trên poster để sửa nhanh</em></summary>
+          <summary><span><b>A5</b><strong>Style chữ</strong></span><em>Font, màu, vị trí</em></summary>
+          <div class="section-head slim-head">
+            <h2>Vùng chữ của màu đang chọn</h2>
+            <button id="btnAddAdminTextField" type="button" class="soft mini">Thêm vùng chữ</button>
+          </div>
           <div id="adminTextFields" class="admin-fields"></div>
         </details>
       </div>
@@ -338,9 +368,9 @@
   </main>
 
   <footer class="footer">
-    <span>Unite Poster Studio Pro v7 · 5 pages · Inline text · Cached assets · Backend AI</span>
+    <span>Unite Poster Studio Pro v6.2 · Leader tạm thời / Admin lưu Cloud</span>
   </footer>
 
-  <script src="js/app.js" type="module"></script>
+  <script src="js/app.js?v=20260617-v620" type="module"></script>
 </body>
 </html>

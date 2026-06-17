@@ -75,3 +75,14 @@ NÂNG CẤP V6.1.7
 - Khi ở chế độ Poster/Leader, hai nút này trở về đúng chức năng Chia sẻ và Xuất PNG.
 - Nhấn logo Unite để chuyển qua lại Poster/Admin như bản trước.
 - Lưu Active sẽ lưu chỉnh sửa khung, chữ, person slot, layer và template lên Supabase để leader dùng chung.
+
+
+NÂNG CẤP V6.2.0
+- Leader được kéo mọi vùng chữ có sẵn theo kiểu chỉnh tạm trong phiên; không làm thay đổi template cloud.
+- Leader được thêm nhiều vùng chữ tạm, đổi font/cỡ/độ đậm/màu/canh lề/độ rộng.
+- Danh sách font Leader lấy trực tiếp từ template.fonts, tức các font Admin đã upload và lưu Active.
+- Khi đổi nền hoặc tải lại trang, toàn bộ vị trí/style tạm và chữ tạm của Leader được xóa.
+- Admin vẫn là người duy nhất thêm/xóa vùng chữ vĩnh viễn, kéo person slot và lưu Active/Draft.
+- Admin có chế độ riêng để kéo/resize ảnh foreground (bản trên) cho từng màu.
+- foregroundVariants[].transform, personSlot, textFields, fonts và layout từng màu được lưu trong poster_templates.template_json.
+- Cải thiện độ tin cậy Supabase: nếu template_json đã lưu nhưng bảng poster_assets log lỗi, UI không còn báo nhầm là toàn bộ thao tác lưu thất bại.

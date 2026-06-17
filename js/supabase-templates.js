@@ -104,7 +104,9 @@ export async function saveTemplateToSupabase({
   template,
   status = "active",
   backgroundFile = null,
+  backgroundVariantFiles = [],
   foregroundFile = null,
+  foregroundVariantFiles = [],
   fontFiles = []
 }) {
   const profile = await assertAdmin();
@@ -119,17 +121,45 @@ export async function saveTemplateToSupabase({
   const uploadedAssets = [];
 
   if (backgroundFile) {
-    const optimizedBackground = await optimizePosterAsset(backgroundFile, workingTemplate.canvas, "background");
-    const bg = await uploadPosterAsset(optimizedBackground, `templates/${slug}`, "background");
+    const bg = await uploadPosterAsset(backgroundFile, `templates/${slug}`, "background");
     workingTemplate.layers.background = bg.publicUrl;
     uploadedAssets.push(bg);
   }
 
+  const variantFiles = Array.isArray(backgroundVariantFiles) ? backgroundVariantFiles : [];
+  if (variantFiles.length && Array.isArray(workingTemplate.backgroundVariants)) {
+    for (const item of variantFiles) {
+      if (!item?.id || !item?.file) continue;
+      const variant = workingTemplate.backgroundVariants.find(bg => bg.id === item.id);
+      if (!variant) continue;
+      const bg = await uploadPosterAsset(item.file, `templates/${slug}/backgrounds`, "background");
+      variant.src = bg.publicUrl;
+      variant.storagePath = bg.storagePath;
+      uploadedAssets.push(bg);
+    }
+    const defaultVariant = workingTemplate.backgroundVariants.find(bg => bg.isDefault) || workingTemplate.backgroundVariants[0];
+    if (defaultVariant?.src) workingTemplate.layers.background = defaultVariant.src;
+  }
+
   if (foregroundFile) {
-    const optimizedForeground = await optimizePosterAsset(foregroundFile, workingTemplate.canvas, "foreground");
-    const fg = await uploadPosterAsset(optimizedForeground, `templates/${slug}`, "foreground");
+    const fg = await uploadPosterAsset(foregroundFile, `templates/${slug}`, "foreground");
     workingTemplate.layers.foreground = fg.publicUrl;
     uploadedAssets.push(fg);
+  }
+
+  const foregroundFiles = Array.isArray(foregroundVariantFiles) ? foregroundVariantFiles : [];
+  if (foregroundFiles.length && Array.isArray(workingTemplate.foregroundVariants)) {
+    for (const item of foregroundFiles) {
+      if (!item?.id || !item?.file) continue;
+      const variant = workingTemplate.foregroundVariants.find(fg => fg.id === item.id);
+      if (!variant) continue;
+      const fg = await uploadPosterAsset(item.file, `templates/${slug}/foregrounds`, "foreground");
+      variant.src = fg.publicUrl;
+      variant.storagePath = fg.storagePath;
+      uploadedAssets.push(fg);
+    }
+    const defaultVariant = workingTemplate.foregroundVariants.find(fg => fg.isDefault) || workingTemplate.foregroundVariants[0];
+    if (defaultVariant?.src) workingTemplate.layers.foreground = defaultVariant.src;
   }
 
   for (const file of fontFiles) {
@@ -144,6 +174,11 @@ export async function saveTemplateToSupabase({
     });
     uploadedAssets.push(fontAsset);
   }
+
+  workingTemplate.fonts = (workingTemplate.fonts || []).filter((font, index, list) => {
+    const identity = `${font.family || ""}|${font.url || ""}`;
+    return list.findIndex(item => `${item.family || ""}|${item.url || ""}` === identity) === index;
+  });
 
   const payload = {
     slug,
@@ -178,7 +213,12 @@ export async function saveTemplateToSupabase({
       .from("poster_assets")
       .insert(assetRows);
 
-    if (assetError) throw assetError;
+    // Template JSON đã được upsert thành công ở trên. Không báo "lưu thất bại"
+    // chỉ vì bảng log asset chưa được tạo/chưa đủ policy.
+    if (assetError) {
+      console.warn("Template đã lưu nhưng poster_assets chưa ghi được:", assetError);
+      saved.asset_log_warning = assetError.message || String(assetError);
+    }
   }
 
   return saved;
@@ -195,48 +235,6 @@ export async function archiveTemplate(slug) {
 
   if (error) throw error;
   return data;
-}
-
-
-async function optimizePosterAsset(file, canvasConfig = {}, assetType = "background") {
-  if (!file?.type?.startsWith("image/")) return file;
-  const targetWidth = Number(canvasConfig.width || 1229);
-  const targetHeight = Number(canvasConfig.height || 1536);
-  const shouldKeepOriginal = assetType === "background"
-    ? (file.type === "image/webp" && file.size < 650_000)
-    : (file.type === "image/png" && file.size < 900_000);
-  if (shouldKeepOriginal) return file;
-
-  try {
-    const bitmap = await createImageBitmap(file);
-    const canvas = document.createElement("canvas");
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
-    const ctx = canvas.getContext("2d", { alpha: assetType !== "background" });
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-
-    const scale = Math.max(targetWidth / bitmap.width, targetHeight / bitmap.height);
-    const drawW = bitmap.width * scale;
-    const drawH = bitmap.height * scale;
-    const dx = (targetWidth - drawW) / 2;
-    const dy = (targetHeight - drawH) / 2;
-    if (assetType === "background") {
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, targetWidth, targetHeight);
-    }
-    ctx.drawImage(bitmap, dx, dy, drawW, drawH);
-    bitmap.close?.();
-
-    const mime = assetType === "background" ? "image/webp" : "image/png";
-    const quality = assetType === "background" ? 0.9 : 1;
-    const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error("Không tối ưu được ảnh")), mime, quality));
-    const baseName = String(file.name || assetType).replace(/\.[^.]+$/, "");
-    return new File([blob], `${baseName}.${assetType === "background" ? "webp" : "png"}`, { type: mime, lastModified: Date.now() });
-  } catch (err) {
-    console.warn("Giữ ảnh gốc vì không tối ưu được", err);
-    return file;
-  }
 }
 
 export async function uploadPosterAsset(file, folder, assetType = "other") {
